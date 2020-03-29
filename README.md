@@ -1,0 +1,1 @@
+To coordinate TDT data with OfflineSorter data exported to Nex files NeuroDataExplorer
