@@ -1,4 +1,4 @@
-import neo
+from neo import NeuroExplorerIO
 import quantities as pq
 #%matplotlib inline
 import matplotlib.pyplot as plt
@@ -9,7 +9,10 @@ from matplotlib.collections import LineCollection
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 from scipy.stats import mode
 import os
+import tdt
 from pandas import IndexSlice as pidx
+import pandas as pd
+from scipy.stats import zscore, mode, sem
 
 # maybe make a dataframe, row for each spike, 
 ## column indexs are wire sort code.
@@ -39,7 +42,10 @@ class TDTNex(object):
         self._nex_fp = nex_file_path
         self.tdt = tdt.read_block(self._tdt_fp)
         self.nex = NeuroExplorerIO(self._nex_fp)
-        self.EMG = self.tdt.streams.EMGx.data
+        try:
+            self.EMG = self.tdt.streams.EMGx.data
+        except AttributeError:
+            self.EMG = None
         self.seg = self.nex.read_segment()
         self._time_stamp_precision = 7 # this is critical, may need to adjust if readers are not aligning well.
         self.calc_sCoef() # side-effect function
@@ -51,6 +57,8 @@ class TDTNex(object):
         return(int(self.tdt.streams.pNeu.fs*ts))
     
     def _ts_EMGx_idx(self,ts):
+        if self.EMG is None:
+            return None
         return(int(self.tdt.streams.EMGx.fs*ts))
     
     def pNeu(self,start=None,stop=None):
@@ -75,8 +83,10 @@ class TDTNex(object):
         xs = np.linspace(S,E,data.shape[1])
         return xs,data
 
-    def EMGx(self,start=None,stop=None):
+    def EMGx(self,start=None,stop=None,ztrans=False):
         tdt_dur = self.tdt.info.duration.total_seconds()
+        sig_mean = self.tdt.streams.EMGx.data.mean(axis=1)
+        sig_std = self.tdt.streams.EMGx.data.std(axis=1)
         if start is not None:
             if (start>0)&(start<=tdt_dur):
                 S = start
@@ -93,10 +103,13 @@ class TDTNex(object):
         else:
             E = tdt_dur
         Sidx,Eidx = self._ts_EMGx_idx(S),self._ts_EMGx_idx(E)
-        data = self.tdt.streams.EMGx.data[:,Sidx:Eidx]
+        data = np.copy(self.tdt.streams.EMGx.data[:,Sidx:Eidx])
+        if ztrans is True:
+            for	ii,(sig_m,sig_std) in enumerate(list(zip(sig_mean,sig_std))):
+                data[ii,:]=(data[ii,:]-sig_m)/sig_std
         xs = np.linspace(S,E,data.shape[1])
         return xs,data
-
+                
     def calc_sCoef(self):
         shared_names = np.intersect1d([k for k in self.tdt.epocs.keys()],
                                       [ev.name for ev in self.seg.events])
@@ -121,6 +134,7 @@ class TDTNex(object):
         ev_dict = {ev.name:ev for idx,ev in enumerate(self.seg.events)}
         #calc the length of event df
         len_ev_df = np.array([len(v.onset) for k,v in self.tdt.epocs.items()]).sum().astype('int')
+        print(len_ev_df)
         ev_df = pd.DataFrame({'name':['NA']*len_ev_df,
                               'onset':np.zeros((len_ev_df,),dtype=np.float),
                               'offset':np.zeros((len_ev_df,),dtype=np.float),
@@ -129,17 +143,27 @@ class TDTNex(object):
                               'offset_neo':np.zeros((len_ev_df,),dtype=np.float),
                               })
         _idx = 0
+        # because some of the offsets are not recorded in the tdt file,
+        # I should specify explictly that some of these are not present and indicate when Infs are added.
         for name in shared_names:
             tdt_ev = self.tdt.epocs[name]
             nex_ev_onset = ev_dict[name]
-            nex_ev_offset = ev_dict[name[0:3]+'\\']
             assert len(nex_ev_onset==len(tdt_ev.onset)), "events of unequal length"
-            ev_df.loc[_idx:_idx+len(tdt_ev.onset),'name'] = name
-            ev_df.loc[_idx:_idx+len(tdt_ev.onset),'onset'] = tdt_ev.onset
-            ev_df.loc[_idx:_idx+len(tdt_ev.onset),'offset'] = tdt_ev.offset
-            ev_df.loc[_idx:_idx+len(tdt_ev.onset),'data'] = tdt_ev.data
-            ev_df.loc[_idx:_idx+len(tdt_ev.onset),'onset_neo'] = nex_ev_onset.times.magnitude
-            ev_df.loc[_idx:_idx+len(tdt_ev.onset),'offset_neo'] = nex_ev_offset.times.magnitude
+            ev_df.loc[_idx:_idx+len(tdt_ev.onset)-1,'name'] = name
+            ev_df.loc[_idx:_idx+len(tdt_ev.onset)-1,'onset'] = tdt_ev.onset
+            ev_df.loc[_idx:_idx+len(tdt_ev.offset)-1,'offset'] = tdt_ev.offset
+            ev_df.loc[_idx:_idx+len(tdt_ev.onset)-1,'data'] = tdt_ev.data
+            ev_df.loc[_idx:_idx+len(tdt_ev.onset)-1,'onset_neo'] = nex_ev_onset.times.magnitude
+            # careful of singleton value onset epocs that don't end 
+            try:
+                nex_ev_offset = ev_dict[name[0:3]+'\\']
+                if len(tdt_ev.offset)==len(nex_ev_offset.times.magnitude)+1:
+                    print('file ended before offset recorded,adding inf to nextime')
+                    ev_df.loc[_idx:_idx+len(tdt_ev.offset)-1,'offset_neo'] = np.r_[nex_ev_offset.times.magnitude,np.inf]
+                else:
+                    ev_df.loc[_idx:_idx+len(tdt_ev.offset)-1,'offset_neo'] = nex_ev_offset.times.magnitude
+            except KeyError:
+                ev_df.loc[_idx:_idx+len(tdt_ev.offset)-1,'offset_neo'] = np.inf
             _idx+=len(tdt_ev.onset)    
         self.ev_df = ev_df
 
@@ -156,12 +180,16 @@ class TDTNex(object):
         # fill in the TDTts and NEOts by wire
         _idx_offset = 0
         pNeufs = tdt.streams.pNeu.fs
-        EMGfs = tdt.streams.EMGx.fs
+        # if there is no EMGx just leave as zeros
+        if self.EMG is not None:
+            EMGfs = tdt.streams.EMGx.fs
         for wire in np.r_[1:17]:
             _wt = tdt.snips.eNeu.ts[np.argwhere(tdt.snips.eNeu.chan.flatten()==wire).flatten()].flatten()
             unitdf.loc[_idx_offset:_idx_offset+len(_wt)-1,'wire']=wire
             unitdf.loc[_idx_offset:_idx_offset+len(_wt)-1,'TDTts']=_wt
-            unitdf.loc[_idx_offset:_idx_offset+len(_wt)-1,'EMGidx']=(_wt*EMGfs).astype(int)
+            if self.EMG is not None:
+                EMGfs = tdt.streams.EMGx.fs
+                unitdf.loc[_idx_offset:_idx_offset+len(_wt)-1,'EMGidx']=(_wt*EMGfs).astype(int)
             unitdf.loc[_idx_offset:_idx_offset+len(_wt)-1,'pNeoidx']=(_wt*pNeufs).astype(int)
             unitdf.loc[_idx_offset:_idx_offset+len(_wt)-1,'NEOts']=np.round(_wt*self.sCoef,
                                                                            self._time_stamp_precision)
@@ -188,6 +216,14 @@ class TDTNex(object):
             # in the data frame the wire and sort code are indexes, so just need to file in the spiketrainindex to point to right row in array
             waveforms[(wn,SC)]=np.copy(_wvs)
         self.unitdf = unitdf.reset_index().set_index(['wire','SC']).sort_index().copy()
+        # coount the number of sorted units, i.e. SC not zero:
+        nunits = 0
+        for (wire, sc),g in self.unitdf.groupby(['wire','SC']):
+            if sc==0:
+                continue
+            else:
+                nunits+=1
+        self.nunits = nunits
         self.waveforms = waveforms
 
     def _make_NexSort_df(self):
@@ -250,7 +286,9 @@ class TDTNex(object):
             _seg_idx+=_mask.sum()
         return(evnts,evntsArray)
             
-    def AllUnitRasters(self,times,lpad,rpad,hist=True,fndec=None):
+    def AllUnitRasters(self,times,lpad,rpad,hist=True,bin_width = 0.1,fndec=None,
+                       hist_yscale=None, lwds = 2, lineoff = 0.8,linelen = 0.8,
+                       inset_yscale=None, raster_color='black',fntitle=False):
         # use TDT time, all in seconds
         plt_dir = os.path.join(os.curdir, "Rasters")
         os.makedirs(plt_dir,exist_ok=True)
@@ -261,9 +299,9 @@ class TDTNex(object):
             if nsnips<5:
                 continue
             f= plt.figure()
-            raster_ax = plt.axes([0.08,0.08,0.85,0.6])
-            hist_ax = plt.axes([0.08,0.65,0.85,0.3])
-            wf_ax = plt.axes([0.65,0.6,0.3,0.3])
+            raster_ax = plt.axes([0.15,0.15,0.6,0.6])
+            hist_ax = plt.axes([0.15,0.75,0.6,0.25])
+            wf_ax = plt.axes([0.75,0.75,0.25,0.25])
             evnts = []
             evntsArray = np.zeros((nsnips,))
             # find out how many snips will be in the raster plot:
@@ -287,14 +325,12 @@ class TDTNex(object):
                 _seg_idx+=_mask.sum()
             raster_segs[:,:,0]=np.r_[0:30]
             random_segs[:,:,0]=np.r_[0:30]
-            lineoff = 0.8
-            linelen = 0.2
-            raster_ax.eventplot(evnts,linewidths = 0.6, linelengths = linelen, 
+            raster_ax.eventplot(evnts,linewidths = lwds, linelengths = linelen, 
                          lineoffsets = lineoff, color = 'black')
             # have to do the inset axes, histogram
             wf_ax.patch.set_alpha(0.02)
             raster_snips = LineCollection(raster_segs, linewidths=0.25,
-                                   colors='red', 
+                                   colors=raster_color, 
                                    linestyle='solid')
             rand_snips = LineCollection(random_segs, linewidths=0.25,
                                    colors='black', 
@@ -302,13 +338,26 @@ class TDTNex(object):
             wf_ax.add_collection(rand_snips)
             wf_ax.add_collection(raster_snips)
             wf_ax.set_xlim(0,30)
-            wf_ax.set_ylim(min(raster_segs[:,:,1].flatten()),max(raster_segs[:,:,1].flatten()))
-            bin_width = 0.05
-            hist_ax.hist(evntsArray,bins = np.r_[-lpad:0:bin_width,0:rpad:bin_width])
+            if inset_yscale is None:
+                wf_ax.set_ylim(min(raster_segs[:,:,1].flatten()),max(raster_segs[:,:,1].flatten()))
+            else:
+                wf_ax.set_ylim(*inset_yscale)
+            wf_ax.xaxis.set_visible(False)
+            wf_ax.yaxis.set_visible(False)
+            bh,bx = np.histogram(evntsArray,bins = np.r_[-lpad:0:bin_width,0:rpad+(bin_width*0.01):bin_width])
+            hist_ax.bar(bx[0:-1],bh/len(times),width = bin_width, align='edge')
+            hist_ax.set_ylabel("inst. freq Hz, %.2f" % bin_width)
+            hist_ax.xaxis.set_visible(False)
             hist_ax.set_xlim(-lpad,rpad)
+            if hist_yscale is not None:
+                hist_ax.set_ylim(*hist_yscale)
             raster_ax.set_xlim(-lpad,rpad)
-            f.text(0.1,0.95,"w:%s,sc:%s" % (wire,sc),transform = f.transFigure)
-            f.set_size_inches(5,5)
+            raster_ax.set_xlabel("time (s)")
+            raster_ax.set_ylabel("trail num.")
+            f.text(0.1,0.85,"w:%s,sc:%s" % (wire,sc),transform = f.transFigure)
+            if fntitle:
+                f.text(0.1,0.95,"fn:%s" % (os.path.basename(self._nex_fp)),transform = f.transFigure)
+            f.set_size_inches(4,4)
             if fndec is None:
                 f.savefig(os.path.join(plt_dir,"Raster_wire%s_sc%s.pdf" % (wire,sc)))
                 f.savefig(os.path.join(plt_dir,"Raster_wire%s_sc%s.png" % (wire,sc)),
@@ -316,8 +365,168 @@ class TDTNex(object):
             else:
                 f.savefig(os.path.join(plt_dir,"Raster_%s_wire%s_sc%s.pdf" % (fndec,wire,sc)))                
                 f.savefig(os.path.join(plt_dir,"Raster_%s_wire%s_sc%s.png" % (fndec,wire,sc)),
-                          dpi = 300,transparent=True)                
-        
+                          dpi = 300,transparent=True)
+
+    def UnitPanel(self,nsnips=50):
+        from math import sqrt, ceil
+        # use the nunit count peformed during the unitdf construction.
+        # just make a square of axes
+        nrow = ceil(sqrt(self.nunits))
+        f,axar = plt.subplots(nrow,nrow,sharex='all')
+        _unit_cnt = 0
+        for (wire, sc),g in self.unitdf.groupby(['wire','SC']):
+            if sc==0:
+                continue
+            totsnips = len(g.TDTts)
+            if totsnips>nsnips:
+                random_segs = np.zeros((nsnips,30,2))
+                random_segs[:,:,1] = self.waveforms[(wire,sc)][np.random.randint(0,totsnips-1,50)]
+            else:
+                random_segs = np.zeros((totsnips,30,2))
+                random_segs[:,:,1] = self.waveforms[(wire,sc)][:]
+            random_segs[:,:,0]=np.r_[0:30]
+            rand_snips = LineCollection(random_segs, linewidths=0.25,
+                                   colors='black', 
+                                   linestyle='solid')
+            ax = axar.flatten()[_unit_cnt]
+            ax.add_collection(rand_snips)
+            ax.set_ylim(min(random_segs[:,:,1].flatten()),
+                        max(random_segs[:,:,1].flatten()))
+            ax.text(0.65,0,"W:%d,SC:%d" % (wire,sc), transform = ax.transAxes, size = 8)
+            _unit_cnt+=1
+        [ax.set_xlim(0,30) for ax in axar.flatten()]
+        f.suptitle("units for %s" % os.path.basename(self._nex_fp))
+        f.set_size_inches(10,10)
+        return f
+
+    def GetWaves(self,wire,sc,start,stop):
+        _unitdf = self.unitdf.reset_index().set_index(['wire','SC'])
+        g = _unitdf.loc[(wire,sc)]
+        times = (start,stop)
+        g_mask = g.TDTts.between(*times)
+        n_wvs = g_mask.sum()
+        if n_wvs==0:
+            return None
+        else:
+            return self.waveforms[(wire,sc)][g_mask,:]
+
+    def SpikeTriggeredEMG(self, wire, sortcode,
+                          DigaChan=1,MastChan=2,
+                          lpad=0.2,rpad=0.2, 
+                          time_buckets = None,
+                          plt_stderr=True,
+                          convolve_s = None,pltdir = '.',**kwargs):
+        """"""
+        if 'EMGpltargs' in kwargs.keys():
+            EMG_plt_args = args['EMGpltargs']
+        else:
+            EMG_plt_args = {'digastric':{'color':'black'},
+                            'maseter':{'color':'red'}}
+        fs = self.tdt.streams.EMGx.fs
+        # raw data option
+        if convolve_s is None:        
+            digRC = zscore(self.EMG[DigaChan,:])
+            masRC = zscore(self.EMG[MastChan,:])
+        else:
+            digRC = zscore(np.convolve(np.abs(self.EMG[DigaChan,:]),
+                           np.ones((int(convolve_s*fs),))/int(convolve_s*fs),mode = 'same'))
+            masRC = zscore(np.convolve(np.abs(self.EMG[MastChan,:]),
+                             np.ones((int(convolve_s*fs),))/int(convolve_s*fs),mode = 'same'))
+        os.makedirs(pltdir, exist_ok=True)
+
+        dp_lpad = self._ts_EMGx_idx(lpad)
+        dp_rpad = self._ts_EMGx_idx(rpad)
+
+        # allow to select some spikes for restricted time buckets, i.e. only spike 15 seconds after taste exposure.
+        g = self.unitdf.reset_index().groupby(['wire','SC']).get_group((wire,sortcode))
+        # if there are no item buckets, set iter to all rows.
+        if time_buckets is None:
+            row_iter = g.iterrows()
+            print("w:%02d sc:%d, %d spikes for averaging" % (wire,sortcode,len(g)))
+            if len(g)<3:
+                print("too few spikes %d %d" % (wire,sortcode))
+                return None
+            nAvg = len(g)
+            f,ax = plt.subplots(1,1)
+        else:
+            _mask = np.zeros((len(g),),dtype = np.bool)
+            for S,E in time_buckets:
+                _mask = _mask | g.TDTts.between(S,E)
+            # if there are no spikes in any of the buckets, give up return none:
+            nAvg = _mask.sum()
+            if _mask.sum()<3:
+                print("too few spikes %d %d" % (wire,sortcode))
+                return None
+            print("w:%02d sc:%d, %d spikes for averaging" % (wire,sortcode,nAvg))
+            row_iter = g[_mask].iterrows()
+            f,ax = plt.subplots(1,1)
+
+        # alloc array for EMG avg
+        dig_ar = np.zeros((dp_lpad+dp_rpad,nAvg))
+        mas_ar = np.zeros((dp_lpad+dp_rpad,nAvg))
+
+        # iterate through the spike times and construct a spike triggered average for the convolved EMG
+        for spk_cnt,(i,row) in enumerate(row_iter):
+            idx = row.EMGidx
+            # skip the spike at the beginning and the end of the record that I won't be able to average.
+            if (idx-dp_lpad)<0:
+                continue
+            if (idx+dp_rpad)>=max(self.EMG.shape):
+                continue
+            dig_ar[:,spk_cnt]=(digRC[int(idx)-dp_lpad:int(idx)+dp_rpad])
+            mas_ar[:,spk_cnt]=(masRC[int(idx)-dp_lpad:int(idx)+dp_rpad])
+        ax.plot(np.linspace(-lpad,rpad,len(dig_ar)),dig_ar.mean(axis=1),label = 'digastric',**EMG_plt_args['digastric'])
+        ax.plot(np.linspace(-lpad,rpad,len(mas_ar)),mas_ar.mean(axis=1),label = 'maseter',**EMG_plt_args['maseter'])
+        if plt_stderr:
+            ax.fill_between(np.linspace(-lpad,rpad,len(dig_ar)),
+                            dig_ar.mean(axis=1)-sem(dig_ar,axis=1),
+                            dig_ar.mean(axis=1)+sem(dig_ar,axis=1),
+                            alpha = 0.4,
+                            **EMG_plt_args['digastric'])
+            ax.fill_between(np.linspace(-lpad,rpad,len(mas_ar)),
+                            mas_ar.mean(axis=1)-sem(mas_ar,axis=1),
+                            mas_ar.mean(axis=1)+sem(mas_ar,axis=1),
+                            alpha = 0.4,
+                            **EMG_plt_args['maseter'])
+
+        axins = plt.axes([0.75,0.75,0.2,0.2])
+        f.add_axes(axins)
+        axins.patch.set_alpha(0.02)
+        # want to select waves for the inset axis that are from the period of time depicted in the raster
+        # plot at most 50 waves, less if there are fewer spikes
+        all_wvs = self.waveforms[(wire,sortcode)]
+        num_all_wvs = len(all_wvs)-1 if (len(all_wvs)<50) else 50
+        # plot a random selection from all the waves
+        slct_wvs = all_wvs[np.random.randint(0,len(all_wvs),num_all_wvs),:]
+        smpl_segs = np.zeros(slct_wvs.shape+(2,))
+        smpl_segs[:,:,1] = slct_wvs
+        smpl_segs[:,:,0] = np.r_[0:30]
+        smpl_snips = LineCollection(smpl_segs, linewidths=0.25,
+                                    colors='black', linestyle='solid')
+        axins.add_collection(smpl_snips)
+        axins.set_zorder(10)
+        ymin, ymax = np.min(smpl_segs[:,:,1]),np.max(smpl_segs[:,:,1])
+        xmin, xmax = np.min(smpl_segs[:,:,0]),np.max(smpl_segs[:,:,0])
+        axins.set_ylim(ymin,ymax)
+        axins.set_xlim(xmin,xmax)
+        axins.text(0,0.95,"w%02sc%d" % (wire,sortcode),transform = axins.transAxes)
+        [x.set_visible(False) for x in [axins.xaxis, axins.yaxis]]
+
+        f.suptitle("w%02sc%d,N=%d" % (wire,sortcode,nAvg))
+        f.savefig(os.path.join(pltdir,"SpikeTriggeredEMG_Wire%02dSC%d.png" % (wire,sortcode)),
+                  dpi = 300,transparent=True)
+
+    def WaterFallEMG(self,times,lpad,rpad,chans = [1,2],ztrans=True,
+                     sig_yoff = 30, trial_yoff = 100):
+        f,ax = plt.subplots(1,1)
+        clr = ['black','blue','red','green']
+        for i,time in enumerate(times):
+            xs,data = self.EMGx(time-lpad,time+rpad,ztrans=ztrans)
+            for chan in chans:
+                ax.plot(xs-time, data[chan,:]+(sig_yoff*(chan-min(chans)))+(i*trial_yoff),
+                        color = clr[chan])
+        return (f,ax)
+
     def OscPanel(self,start,stop,wires,EMG_chns=None):
         _unitdf = self.unitdf.reset_index()
         wgb = _unitdf.groupby('wire')
