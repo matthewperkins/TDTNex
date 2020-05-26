@@ -208,6 +208,7 @@ class TDTNex(object):
             assert len(g.st)==len(unitdf.loc[pidx[wn,g.st],'SC']), "Not all time stamps are matched, only %d NexStamps are matched out of %d Total NexStamps"  % (len(g.st),len(unitdf.loc[pidx[wn,g.st],'SC']))
 
             # now get the waveforms
+            # I should get the waveforms from TDT i think?
             _wvs = self.nex._get_spike_raw_waveforms(0,0,st_num,0*pq.s,
                                                      self.seg.t_stop)[:,0,:]
 
@@ -359,20 +360,34 @@ class TDTNex(object):
                 f.text(0.1,0.95,"fn:%s" % (os.path.basename(self._nex_fp)),transform = f.transFigure)
             f.set_size_inches(4,4)
             if fndec is None:
-                f.savefig(os.path.join(plt_dir,"Raster_wire%s_sc%s.pdf" % (wire,sc)))
-                f.savefig(os.path.join(plt_dir,"Raster_wire%s_sc%s.png" % (wire,sc)),
+                f.savefig(os.path.join(plt_dir,"Raster_wire%02d_sc%s.pdf" % (wire,sc)))
+                f.savefig(os.path.join(plt_dir,"Raster_wire%02d_sc%s.png" % (wire,sc)),
                           dpi = 300,transparent=True)
             else:
-                f.savefig(os.path.join(plt_dir,"Raster_%s_wire%s_sc%s.pdf" % (fndec,wire,sc)))                
-                f.savefig(os.path.join(plt_dir,"Raster_%s_wire%s_sc%s.png" % (fndec,wire,sc)),
+                f.savefig(os.path.join(plt_dir,"Raster_%s_wire%02d_sc%s.pdf" % (fndec,wire,sc)))                
+                f.savefig(os.path.join(plt_dir,"Raster_%s_wire%02d_sc%s.png" % (fndec,wire,sc)),
                           dpi = 300,transparent=True)
 
-    def UnitPanel(self,nsnips=50):
+    def UnitPanel(self,nsnips=50,lattice=True):
         from math import sqrt, ceil
         # use the nunit count peformed during the unitdf construction.
         # just make a square of axes
         nrow = ceil(sqrt(self.nunits))
         f,axar = plt.subplots(nrow,nrow,sharex='all')
+        if lattice:
+            f,axar = plt.subplots(4,4,sharex='all')
+            sc_cmap = plt.get_cmap('Set1')
+            # compute global min and max for all units on a wire
+            wire_ylims = {wire:[0,0] for wire in np.r_[1:17]}
+            for (wire, sc),g in self.unitdf.groupby(['wire','SC']):
+                totsnips = len(g.TDTts)
+                if totsnips<50:
+                    tmp_wvs = self.waveforms[(wire,sc)][np.random.randint(0,totsnips-1,50)]
+                else:
+                    tmp_wvs = self.waveforms[(wire,sc)]
+                print(tmp_wvs.flatten().shape)
+                if min(tmp_wvs.flatten())<wire_ylims[wire][0]: wire_ylims[wire][0] = min(tmp_wvs.flatten()) 
+                if max(tmp_wvs.flatten())>wire_ylims[wire][1]: wire_ylims[wire][1] = max(tmp_wvs.flatten()) 
         _unit_cnt = 0
         for (wire, sc),g in self.unitdf.groupby(['wire','SC']):
             if sc==0:
@@ -385,13 +400,24 @@ class TDTNex(object):
                 random_segs = np.zeros((totsnips,30,2))
                 random_segs[:,:,1] = self.waveforms[(wire,sc)][:]
             random_segs[:,:,0]=np.r_[0:30]
+            if lattice:
+                snip_color = sc_cmap(sc/10)
+            else:
+                snip_color = 'black'
             rand_snips = LineCollection(random_segs, linewidths=0.25,
-                                   colors='black', 
+                                   colors=snip_color,
                                    linestyle='solid')
-            ax = axar.flatten()[_unit_cnt]
+            if lattice:
+                ax = axar.flatten()[wire-1]
+            else:
+                ax = axar.flatten()[_unit_cnt]
+            
             ax.add_collection(rand_snips)
-            ax.set_ylim(min(random_segs[:,:,1].flatten()),
-                        max(random_segs[:,:,1].flatten()))
+            if lattice:
+                ax.set_ylim(wire_ylims[wire])
+            else:
+                ax.set_ylim(min(random_segs[:,:,1].flatten()),
+                            max(random_segs[:,:,1].flatten()))
             ax.text(0.65,0,"W:%d,SC:%d" % (wire,sc), transform = ax.transAxes, size = 8)
             _unit_cnt+=1
         [ax.set_xlim(0,30) for ax in axar.flatten()]
