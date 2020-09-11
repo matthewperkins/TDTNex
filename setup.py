@@ -5,7 +5,7 @@ with open("README.md", "r") as fh:
 
 setuptools.setup(
     name="TDTNex", # Replace with your own username
-    version="0.0.7",
+    version="0.1.0",
     author="Matthew Perkins",
     author_email="matthew.perkins@mssm.edu",
     description="Coordinate TDT data tanks with Nex Files",
@@ -16,7 +16,7 @@ setuptools.setup(
     install_requires=['pandas',
                       'numpy',
                       'matplotlib',
-                      'tdt==0.3.4',
+                      'tdt==0.3.6',
                       'neo'],
     classifiers=[
         "Programming Language :: Python :: 3",
