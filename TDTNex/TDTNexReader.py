@@ -47,8 +47,6 @@ class TDTNex(object):
         except AttributeError:
             self.EMG = None
         self.seg = self.nex.read_segment()
-        self._time_stamp_precision = 7 # this is critical, may need to adjust if readers are not aligning well.
-        self.calc_sCoef() # side-effect function
         self._make_event_df() # side effect to add df to self.
         self._make_NexSort_df() # side-effect function add df to self
         self._make_Unit_df() # side-effect function add df to self
@@ -72,10 +70,12 @@ class TDTNex(object):
         else:
             S = 0
         if stop is not None:
-            if (stop>0)&(stop>start)&(stop<tdt_dur):
+            if ((stop>0)&(stop>start)&(stop<tdt_dur)):
                 E = stop
             else:
                 print('Stop arg is bad, setting to end of file')
+                E = tdt_dur
+                print(E,tdt_dur)
         else:
             E = tdt_dur
         Sidx,Eidx = self._ts_pNeu_idx(S),self._ts_pNeu_idx(E)
@@ -96,10 +96,12 @@ class TDTNex(object):
         else:
             S = 0
         if stop is not None:
-            if (stop>0)&(stop>start)&(stop<tdt_dur):
+            if ((stop>0)&(stop>start)&(stop<tdt_dur)):
                 E = stop
             else:
                 print('Stop arg is bad, setting to end of file')
+                E = tdt_dur
+                print(E,tdt_dur)
         else:
             E = tdt_dur
         Sidx,Eidx = self._ts_EMGx_idx(S),self._ts_EMGx_idx(E)
@@ -110,73 +112,52 @@ class TDTNex(object):
         xs = np.linspace(S,E,data.shape[1])
         return xs,data
                 
-    def calc_sCoef(self):
-        shared_names = np.intersect1d([k for k in self.tdt.epocs.keys()],
-                                      [ev.name for ev in self.seg.events])
-        ev_dict = {ev.name:ev for idx,ev in enumerate(self.seg.events)}
-        if len(shared_names)==0:
-            raise ValueError('No Shared events with which to calculate time skew')
-        # find the first shared name with events:
-        for shared_name in shared_names:
-            if ev_dict[shared_name].times.size!=0:
-                print("shared name: '%s'" % shared_name)
-                break
-        _nex_time = ev_dict[shared_name].times[-1].magnitude
-        _tdt_time = self.tdt.epocs[shared_name].onset[-1]
-        second_creep = (_tdt_time-_nex_time)/_tdt_time
-        # store the sCoef, no return
-        self.sCoef = 1-second_creep
-        
     def _make_event_df(self):
         """Specific to epocs with offsets"""
-        shared_names = np.intersect1d(sorted(self.tdt.epocs.keys()),
-                                      sorted([ev.name for ev in self.seg.events]))
-        ev_dict = {ev.name:ev for idx,ev in enumerate(self.seg.events)}
         #calc the length of event df
         len_ev_df = np.array([len(v.onset) for k,v in self.tdt.epocs.items()]).sum().astype('int')
         print(len_ev_df)
         ev_df = pd.DataFrame({'name':['NA']*len_ev_df,
                               'onset':np.zeros((len_ev_df,),dtype=np.float),
                               'offset':np.zeros((len_ev_df,),dtype=np.float),
-                              'data':np.zeros((len_ev_df,),dtype=np.float),
-                              'onset_neo':np.zeros((len_ev_df,),dtype=np.float),
-                              'offset_neo':np.zeros((len_ev_df,),dtype=np.float),
+                              'data':np.zeros((len_ev_df,),dtype=np.float)
                               })
         _idx = 0
         # because some of the offsets are not recorded in the tdt file,
         # I should specify explictly that some of these are not present and indicate when Infs are added.
-        for name in shared_names:
-            tdt_ev = self.tdt.epocs[name]
-            nex_ev_onset = ev_dict[name]
-            assert len(nex_ev_onset==len(tdt_ev.onset)), "events of unequal length"
-            ev_df.loc[_idx:_idx+len(tdt_ev.onset)-1,'name'] = name
+        for k,v in self.tdt.epocs.items():
+            tdt_ev = self.tdt.epocs[k]
+            ev_df.loc[_idx:_idx+len(tdt_ev.onset)-1,'name'] = k
             ev_df.loc[_idx:_idx+len(tdt_ev.onset)-1,'onset'] = tdt_ev.onset
             ev_df.loc[_idx:_idx+len(tdt_ev.offset)-1,'offset'] = tdt_ev.offset
             ev_df.loc[_idx:_idx+len(tdt_ev.onset)-1,'data'] = tdt_ev.data
-            ev_df.loc[_idx:_idx+len(tdt_ev.onset)-1,'onset_neo'] = nex_ev_onset.times.magnitude
             # careful of singleton value onset epocs that don't end 
-            try:
-                nex_ev_offset = ev_dict[name[0:3]+'\\']
-                if len(tdt_ev.offset)==len(nex_ev_offset.times.magnitude)+1:
-                    print('file ended before offset recorded,adding inf to nextime')
-                    ev_df.loc[_idx:_idx+len(tdt_ev.offset)-1,'offset_neo'] = np.r_[nex_ev_offset.times.magnitude,np.inf]
-                else:
-                    ev_df.loc[_idx:_idx+len(tdt_ev.offset)-1,'offset_neo'] = nex_ev_offset.times.magnitude
-            except KeyError:
-                ev_df.loc[_idx:_idx+len(tdt_ev.offset)-1,'offset_neo'] = np.inf
             _idx+=len(tdt_ev.onset)    
         self.ev_df = ev_df
 
     def _make_Unit_df(self):
         from pandas import IndexSlice as pidx
         tdt = self.tdt
+        # first fill in the nex sortcode to the snips struct as a new attribute
+        # tdt.snips.eNeu.nexsortcode
+        tdt.snips.eNeu.nexsortcode = np.copy(tdt.snips.eNeu.sortcode)
+        nxdf = self.nex_df.reset_index().copy()
+        for wn,g in nxdf.groupby('wire'):
+            sortcodes  = g.sort_values('st')['SC']
+            # assign the sort codes to the wire keep in time order.
+            tdt.snips.eNeu.nexsortcode[tdt.snips.eNeu.chan==wn] = g.sort_values('st')['SC']
+
+        # now create a dataframe for the spikes    
         frlen = len(tdt.snips.eNeu.ts)
         unitdf = pd.DataFrame({'wire':np.zeros((frlen,),dtype=np.int),
-                              'SC':np.zeros((frlen,),dtype=np.int), # use -1 for unsorted
-                              'TDTts':np.zeros((frlen,),dtype=np.float),
-                              'NEOts':np.zeros((frlen,),dtype=np.float),
-                              'EMGidx':np.zeros((frlen,),dtype=np.int),
-                              'pNeoidx':np.zeros((frlen,),dtype=np.int)})
+                            'TankSC':np.zeros((frlen,),dtype=np.int), # use -1 for unsorted
+                            'NEXSC':np.zeros((frlen,),dtype=np.int), # use -1 for unsorted
+                            'TDTts':np.zeros((frlen,),dtype=np.float),
+                            'TDTwvidx':np.zeros((frlen,),dtype=np.int),
+                            'EMGidx':np.zeros((frlen,),dtype=np.int),
+                            'pNeuidx':np.zeros((frlen,),dtype=np.int)})
+
+
         # fill in the TDTts and NEOts by wire
         _idx_offset = 0
         pNeufs = tdt.streams.pNeu.fs
@@ -185,41 +166,32 @@ class TDTNex(object):
             EMGfs = tdt.streams.EMGx.fs
         for wire in np.r_[1:17]:
             _wt = tdt.snips.eNeu.ts[np.argwhere(tdt.snips.eNeu.chan.flatten()==wire).flatten()].flatten()
+            _nexsc = tdt.snips.eNeu.nexsortcode[np.argwhere(tdt.snips.eNeu.chan.flatten()==wire).flatten()].flatten()
+            _tanksc = tdt.snips.eNeu.sortcode[np.argwhere(tdt.snips.eNeu.chan.flatten()==wire).flatten()].flatten()
+            _wwvidx = np.argwhere(tdt.snips.eNeu.chan.flatten()==wire).flatten()
             unitdf.loc[_idx_offset:_idx_offset+len(_wt)-1,'wire']=wire
+            unitdf.loc[_idx_offset:_idx_offset+len(_wt)-1,'TankSC']=_tanksc
+            unitdf.loc[_idx_offset:_idx_offset+len(_wt)-1,'NEXSC']=_nexsc
             unitdf.loc[_idx_offset:_idx_offset+len(_wt)-1,'TDTts']=_wt
+            unitdf.loc[_idx_offset:_idx_offset+len(_wt)-1,'TDTwvidx']=_wwvidx
             if self.EMG is not None:
                 EMGfs = tdt.streams.EMGx.fs
                 unitdf.loc[_idx_offset:_idx_offset+len(_wt)-1,'EMGidx']=(_wt*EMGfs).astype(int)
-            unitdf.loc[_idx_offset:_idx_offset+len(_wt)-1,'pNeoidx']=(_wt*pNeufs).astype(int)
-            unitdf.loc[_idx_offset:_idx_offset+len(_wt)-1,'NEOts']=np.round(_wt*self.sCoef,
-                                                                           self._time_stamp_precision)
+            unitdf.loc[_idx_offset:_idx_offset+len(_wt)-1,'pNeuidx']=(_wt*pNeufs).astype(int)
             #
             _idx_offset+=len(_wt)
-        # now the painful loop, iterate over the wires, for each wire, 
-        ## iterate over the sort codes, match times and assign the SC and waveforms
-        unitdf.set_index(['wire','NEOts'],inplace=True)
-        # update the sorts, and fill the waveforms
-        nxdf = self.nex_df.reset_index().copy()
+
+        unitdf.set_index(['wire'],inplace=True)
+        # now get the waveforms
         waveforms = {}
-        for (wn,SC,st_num),g in nxdf.groupby(['wire','SC','st_num']):
+        for (wn,nexsc),g in unitdf.groupby(['wire','NEXSC']):
             # need to pull out the waves here.
-            unitdf.loc[pidx[wn,g.st],'SC'] = SC
-            # make sure that the index matching on time stamps has worked, this could be file and rounding dependent, is brittle.
-            assert len(g.st)==len(unitdf.loc[pidx[wn,g.st],'SC']), "Not all time stamps are matched, only %d NexStamps are matched out of %d Total NexStamps"  % (len(g.st),len(unitdf.loc[pidx[wn,g.st],'SC']))
-
-            # now get the waveforms
-            # I should get the waveforms from TDT i think?
-            _wvs = self.nex._get_spike_raw_waveforms(0,0,st_num,0*pq.s,
-                                                     self.seg.t_stop)[:,0,:]
-
-            # maybe the best thing to do is pack all the waveforms into list of arrays:
-            # [wire,sortcode,np.array[spikenumber,[mV0:30]]]
-            # in the data frame the wire and sort code are indexes, so just need to file in the spiketrainindex to point to right row in array
-            waveforms[(wn,SC)]=np.copy(_wvs)
-        self.unitdf = unitdf.reset_index().set_index(['wire','SC']).sort_index().copy()
+            _wvs = self.tdt.snips.eNeu.data[g.TDTwvidx.values]
+            waveforms[(wn,nexsc)]=np.copy(_wvs)
+        self.unitdf = unitdf.reset_index().set_index(['wire','NEXSC']).sort_index().copy()
         # coount the number of sorted units, i.e. SC not zero:
         nunits = 0
-        for (wire, sc),g in self.unitdf.groupby(['wire','SC']):
+        for (wire, sc),g in self.unitdf.groupby(['wire','NEXSC']):
             if sc==0:
                 continue
             else:
@@ -231,7 +203,7 @@ class TDTNex(object):
         tdt = self.tdt
         # do the sort codes as integers, make unsorted = 0
         from string import ascii_lowercase
-        SCdict = {ltr:SC+1 for SC,ltr in enumerate([x for x in ascii_lowercase[0:10]])}
+        SCdict = {ltr:SC+1 for SC,ltr in enumerate([x for x in ascii_lowercase[0:26]])}
         SCdict['U']=0
 
         # make a data frame from all the nexsorted stuff
@@ -264,110 +236,113 @@ class TDTNex(object):
             SC = SCdict[st.name[5]]
             NexSorted_df.loc[_idx:_idx+len(st)-1,'SC']=SC
             NexSorted_df.loc[_idx:_idx+len(st)-1,'st_num']=st_num
-            NexSorted_df.loc[_idx:_idx+len(st)-1,'st']=np.round(st.times.magnitude,
-                                                                self._time_stamp_precision)
+            NexSorted_df.loc[_idx:_idx+len(st)-1,'st']=st.times.magnitude
             _idx+=len(st)
         NexSorted_df.set_index(['wire','SC'],inplace=True)
         self.nex_df = NexSorted_df
         
     def UnitRaster(self,wire,sc,times,lpad,rpad):
-        g = self.unitdf.groupby(['wire','SC']).get_group((wire,sc))
+        """Return a list of events, an array of all events, and set of waveform segments
+        """
+        g = self.unitdf.groupby(['wire','NEXSC']).get_group((wire,sc))
         try:
             iter(times)
         except TypeError:
             times=[times]
         nsnips = int(np.array([g.TDTts.between(t-lpad,t+rpad).sum() for t in times]).sum())
+        raster_segs = np.zeros((nsnips,30,2))
+        # do the xs on the raster_segs collection just 0-30
+        raster_segs[:,:,0]=np.r_[0:30]
         evntsArray = np.zeros((nsnips,))
         evnts = []
         _seg_idx=0
         for t in times:
             _mask = g.TDTts.between(t-lpad,t+rpad)
+            raster_segs[_seg_idx:_seg_idx+_mask.sum(),:,1]=self.waveforms[(wire,sc)][_mask,:]
             evnts.append(g[_mask]['TDTts'].values-t) # subtract t shift to zero
             evntsArray[_seg_idx:_seg_idx+_mask.sum()]=evnts[-1]
             _seg_idx+=_mask.sum()
-        return(evnts,evntsArray)
+        return(evnts,evntsArray,raster_segs)
+
+    def PlotUnitRaster(self,wire,sc,times,lpad,rpad,hist=True,
+                       bin_width=0.1,hist_yscale=None, 
+                       lwds=1,lineoff=0.8,linelen=0.8,
+                       inset_yscale=None,raster_color='black',plt_rand=False):
+        evnts, evntsArray,raster_segs = self.UnitRaster(wire,sc,times,lpad,rpad)
+        nsnips = len(evntsArray)
+        if nsnips<1:
+            print("fewer than 1 snips")
+            return(None, (None, None, None,))
+        f= plt.figure()
+        raster_ax = plt.axes([0.15,0.15,0.6,0.6])
+        hist_ax = plt.axes([0.15,0.75,0.6,0.25])
+        wf_ax = plt.axes([0.75,0.75,0.25,0.25])
+        # preindex a segs array for the random line collection
+        totsnips = len(self.unitdf.loc[(wire,sc),'TDTts'])
+        if totsnips>50:
+            random_segs = np.zeros((50,30,2))
+            random_segs[:,:,1] = self.waveforms[(wire,sc)][np.random.randint(0,totsnips-1,50)]
+        else:
+            random_segs = np.zeros((totsnips,30,2))
+            random_segs[:,:,1] = self.waveforms[(wire,sc)][:]
+        random_segs[:,:,0]=np.r_[0:30]
+        raster_ax.eventplot(evnts,linewidths = lwds, linelengths = linelen, 
+                            lineoffsets = lineoff, color = 'black')
+        # have to do the inset axes, histogram
+        wf_ax.patch.set_alpha(0.02)
+        raster_snips = LineCollection(raster_segs, linewidths=0.25,
+                                colors=raster_color, 
+                                linestyle='solid')
+        rand_snips = LineCollection(random_segs, linewidths=0.25,
+                                colors='blue', 
+                                linestyle='solid')
+        if plt_rand:
+            wf_ax.add_collection(rand_snips)
+        wf_ax.add_collection(raster_snips)
+        wf_ax.set_xlim(0,30)
+        if inset_yscale is None:
+            wf_ax.set_ylim(min(raster_segs[:,:,1].flatten()),max(raster_segs[:,:,1].flatten()))
+        else:
+            wf_ax.set_ylim(*inset_yscale)
+        wf_ax.xaxis.set_visible(False)
+        wf_ax.yaxis.set_visible(False)
+        bh,bx = np.histogram(evntsArray,bins = np.r_[-lpad:0:bin_width,0:rpad+(bin_width*0.01):bin_width])
+        hist_ax.bar(bx[0:-1],bh/len(times)/bin_width,width = bin_width, align='edge')
+        hist_ax.set_ylabel("inst. freq Hz, %.2f" % bin_width)
+        hist_ax.xaxis.set_visible(False)
+        hist_ax.set_xlim(-lpad,rpad)
+        if hist_yscale is not None:
+            hist_ax.set_ylim(*hist_yscale)
+        raster_ax.set_xlim(-lpad,rpad)
+        raster_ax.set_xlabel("time (s)")
+        raster_ax.set_ylabel("trail num.")
+        f.text(0.1,0.85,"w:%s,sc:%s" % (wire,sc),transform = f.transFigure)
+        f.set_size_inches(4,4)
+        return f, (hist_ax, raster_ax, wf_ax)
+        
             
     def AllUnitRasters(self,times,lpad,rpad,hist=True,bin_width = 0.1,fndec=None,
-                       hist_yscale=None, lwds = 2, lineoff = 0.8,linelen = 0.8,
-                       inset_yscale=None, raster_color='black',fntitle=False):
+                       hist_yscale=None, lwds = 1, lineoff = 0.8,linelen = 0.8,
+                       inset_yscale=None, raster_color='black',fntitle=False,frmt='png',plt_dir=None):
         # use TDT time, all in seconds
-        plt_dir = os.path.join(os.curdir, "Rasters")
+        if plt_dir is None:
+            plt_dir = os.path.join(os.curdir, "Rasters")
         os.makedirs(plt_dir,exist_ok=True)
-        for (wire, sc),g  in self.unitdf.groupby(['wire','SC']):
+        for (wire, sc),g  in self.unitdf.groupby(['wire','NEXSC']):
             if sc==0:
                 continue
-            nsnips = int(np.array([g.TDTts.between(t-lpad,t+rpad).sum() for t in times]).sum())
-            if nsnips<5:
+            f,(hist_ax,raster_ax,wf_ax) = self.PlotUnitRaster(wire,sc,times,lpad,rpad,hist,bin_width,hist_yscale,
+                                                                lwds,lineoff,linelen,inset_yscale,raster_color)
+            if f is None:
                 continue
-            f= plt.figure()
-            raster_ax = plt.axes([0.15,0.15,0.6,0.6])
-            hist_ax = plt.axes([0.15,0.75,0.6,0.25])
-            wf_ax = plt.axes([0.75,0.75,0.25,0.25])
-            evnts = []
-            evntsArray = np.zeros((nsnips,))
-            # find out how many snips will be in the raster plot:
-            # preindex a segs array for the line collection
-            raster_segs = np.zeros((nsnips,30,2))
-            # also pull out random segments for comparison, get 50 random if there are more than 50, 
-            # otherwise grab them all.
-            totsnips = len(g.TDTts)
-            if totsnips>50:
-                random_segs = np.zeros((50,30,2))
-                random_segs[:,:,1] = self.waveforms[(wire,sc)][np.random.randint(0,totsnips-1,50)]
-            else:
-                random_segs = np.zeros((totsnips,30,2))
-                random_segs[:,:,1] = self.waveforms[(wire,sc)][:]
-            _seg_idx = 0
-            for t in times:
-                _mask = g.TDTts.between(t-lpad,t+rpad)
-                evnts.append(g[_mask]['TDTts'].values-t) # subtract t shift to zero
-                evntsArray[_seg_idx:_seg_idx+_mask.sum()]=evnts[-1]
-                raster_segs[_seg_idx:_seg_idx+_mask.sum(),:,1]=self.waveforms[(wire,sc)][_mask,:]
-                _seg_idx+=_mask.sum()
-            raster_segs[:,:,0]=np.r_[0:30]
-            random_segs[:,:,0]=np.r_[0:30]
-            raster_ax.eventplot(evnts,linewidths = lwds, linelengths = linelen, 
-                         lineoffsets = lineoff, color = 'black')
-            # have to do the inset axes, histogram
-            wf_ax.patch.set_alpha(0.02)
-            raster_snips = LineCollection(raster_segs, linewidths=0.25,
-                                   colors=raster_color, 
-                                   linestyle='solid')
-            rand_snips = LineCollection(random_segs, linewidths=0.25,
-                                   colors='black', 
-                                   linestyle='solid')
-            wf_ax.add_collection(rand_snips)
-            wf_ax.add_collection(raster_snips)
-            wf_ax.set_xlim(0,30)
-            if inset_yscale is None:
-                wf_ax.set_ylim(min(raster_segs[:,:,1].flatten()),max(raster_segs[:,:,1].flatten()))
-            else:
-                wf_ax.set_ylim(*inset_yscale)
-            wf_ax.xaxis.set_visible(False)
-            wf_ax.yaxis.set_visible(False)
-            bh,bx = np.histogram(evntsArray,bins = np.r_[-lpad:0:bin_width,0:rpad+(bin_width*0.01):bin_width])
-            hist_ax.bar(bx[0:-1],bh/len(times),width = bin_width, align='edge')
-            hist_ax.set_ylabel("inst. freq Hz, %.2f" % bin_width)
-            hist_ax.xaxis.set_visible(False)
-            hist_ax.set_xlim(-lpad,rpad)
-            if hist_yscale is not None:
-                hist_ax.set_ylim(*hist_yscale)
-            raster_ax.set_xlim(-lpad,rpad)
-            raster_ax.set_xlabel("time (s)")
-            raster_ax.set_ylabel("trail num.")
-            f.text(0.1,0.85,"w:%s,sc:%s" % (wire,sc),transform = f.transFigure)
-            if fntitle:
-                f.text(0.1,0.95,"fn:%s" % (os.path.basename(self._nex_fp)),transform = f.transFigure)
-            f.set_size_inches(4,4)
             if fndec is None:
-                f.savefig(os.path.join(plt_dir,"Raster_wire%02d_sc%s.pdf" % (wire,sc)))
-                f.savefig(os.path.join(plt_dir,"Raster_wire%02d_sc%s.png" % (wire,sc)),
-                          dpi = 300,transparent=True)
+                f.savefig(os.path.join(plt_dir,"Raster_wire%02d_sc%s.%s" % (wire,sc,frmt)),
+                        dpi = 300,transparent=True)
             else:
-                f.savefig(os.path.join(plt_dir,"Raster_%s_wire%02d_sc%s.pdf" % (fndec,wire,sc)))                
-                f.savefig(os.path.join(plt_dir,"Raster_%s_wire%02d_sc%s.png" % (fndec,wire,sc)),
-                          dpi = 300,transparent=True)
+                f.savefig(os.path.join(plt_dir,"Raster_%s_wire%02d_sc%s.%s" % (fndec,wire,sc,frmt)),
+                        dpi = 300,transparent=True)
 
+        
     def UnitPanel(self,nsnips=50,lattice=True):
         from math import sqrt, ceil
         # use the nunit count peformed during the unitdf construction.
@@ -379,7 +354,7 @@ class TDTNex(object):
             sc_cmap = plt.get_cmap('Set1')
             # compute global min and max for all units on a wire
             wire_ylims = {wire:[0,0] for wire in np.r_[1:17]}
-            for (wire, sc),g in self.unitdf.groupby(['wire','SC']):
+            for (wire, sc),g in self.unitdf.groupby(['wire','NEXSC']):
                 totsnips = len(g.TDTts)
                 if totsnips<50:
                     tmp_wvs = self.waveforms[(wire,sc)][np.random.randint(0,totsnips-1,50)]
@@ -389,7 +364,7 @@ class TDTNex(object):
                 if min(tmp_wvs.flatten())<wire_ylims[wire][0]: wire_ylims[wire][0] = min(tmp_wvs.flatten()) 
                 if max(tmp_wvs.flatten())>wire_ylims[wire][1]: wire_ylims[wire][1] = max(tmp_wvs.flatten()) 
         _unit_cnt = 0
-        for (wire, sc),g in self.unitdf.groupby(['wire','SC']):
+        for (wire, sc),g in self.unitdf.groupby(['wire','NEXSC']):
             if sc==0:
                 continue
             totsnips = len(g.TDTts)
@@ -426,7 +401,7 @@ class TDTNex(object):
         return f
 
     def GetWaves(self,wire,sc,start,stop):
-        _unitdf = self.unitdf.reset_index().set_index(['wire','SC'])
+        _unitdf = self.unitdf.reset_index().set_index(['wire','NEXSC'])
         g = _unitdf.loc[(wire,sc)]
         times = (start,stop)
         g_mask = g.TDTts.between(*times)
@@ -440,7 +415,7 @@ class TDTNex(object):
                           DigaChan=1,MastChan=2,
                           lpad=0.2,rpad=0.2, 
                           time_buckets = None,
-                          plt_stderr=True,
+                          plt_stderr=True, ylim=False,
                           convolve_s = None,pltdir = '.',**kwargs):
         """"""
         if 'EMGpltargs' in kwargs.keys():
@@ -464,7 +439,7 @@ class TDTNex(object):
         dp_rpad = self._ts_EMGx_idx(rpad)
 
         # allow to select some spikes for restricted time buckets, i.e. only spike 15 seconds after taste exposure.
-        g = self.unitdf.reset_index().groupby(['wire','SC']).get_group((wire,sortcode))
+        g = self.unitdf.reset_index().groupby(['wire','NEXSC']).get_group((wire,sortcode))
         # if there are no item buckets, set iter to all rows.
         if time_buckets is None:
             row_iter = g.iterrows()
@@ -514,6 +489,8 @@ class TDTNex(object):
                             mas_ar.mean(axis=1)+sem(mas_ar,axis=1),
                             alpha = 0.4,
                             **EMG_plt_args['maseter'])
+        if ylim:
+            ax.set_ylim(ylim)
 
         axins = plt.axes([0.75,0.75,0.2,0.2])
         f.add_axes(axins)
@@ -521,18 +498,27 @@ class TDTNex(object):
         # want to select waves for the inset axis that are from the period of time depicted in the raster
         # plot at most 50 waves, less if there are fewer spikes
         all_wvs = self.waveforms[(wire,sortcode)]
-        num_all_wvs = len(all_wvs)-1 if (len(all_wvs)<50) else 50
+        num_rnd_wvs = len(all_wvs)-1 if (len(all_wvs)<50) else 50
         # plot a random selection from all the waves
-        slct_wvs = all_wvs[np.random.randint(0,len(all_wvs),num_all_wvs),:]
-        smpl_segs = np.zeros(slct_wvs.shape+(2,))
-        smpl_segs[:,:,1] = slct_wvs
-        smpl_segs[:,:,0] = np.r_[0:30]
-        smpl_snips = LineCollection(smpl_segs, linewidths=0.25,
-                                    colors='black', linestyle='solid')
-        axins.add_collection(smpl_snips)
+        rnd_wvs = all_wvs[np.random.randint(0,len(all_wvs),num_rnd_wvs),:]
+        rnd_segs = np.zeros(rnd_wvs.shape+(2,))
+        rnd_segs[:,:,1] = rnd_wvs
+        rnd_segs[:,:,0] = np.r_[0:30]
+        rnd_snips = LineCollection(rnd_segs, linewidths=0.25,
+                                    colors='blue', linestyle='solid')
+        axins.add_collection(rnd_snips)
+        if time_buckets is not None:
+            # plot the raster waves
+            raster_wvs = self.waveforms[(wire,sortcode)][_mask]
+            raster_segs = np.zeros(raster_wvs.shape + (2,))
+            raster_segs[:,:,1] = raster_wvs
+            raster_segs[:,:,0] = np.r_[0:30]
+            raster_snips = LineCollection(raster_segs, linewidths=0.25,
+                                            colors='black', linestyle='solid')
+            axins.add_collection(raster_snips)
         axins.set_zorder(10)
-        ymin, ymax = np.min(smpl_segs[:,:,1]),np.max(smpl_segs[:,:,1])
-        xmin, xmax = np.min(smpl_segs[:,:,0]),np.max(smpl_segs[:,:,0])
+        ymin, ymax = np.min(rnd_segs[:,:,1]),np.max(rnd_segs[:,:,1])
+        xmin, xmax = np.min(rnd_segs[:,:,0]),np.max(rnd_segs[:,:,0])
         axins.set_ylim(ymin,ymax)
         axins.set_xlim(xmin,xmax)
         axins.text(0,0.95,"w%02sc%d" % (wire,sortcode),transform = axins.transAxes)
@@ -543,14 +529,15 @@ class TDTNex(object):
                   dpi = 300,transparent=True)
 
     def WaterFallEMG(self,times,lpad,rpad,chans = [1,2],ztrans=True,
-                     sig_yoff = 30, trial_yoff = 100):
+                     sig_yoff = 30, trial_yoff = 100,plt_args=None):
         f,ax = plt.subplots(1,1)
         clr = ['black','blue','red','green']
         for i,time in enumerate(times):
             xs,data = self.EMGx(time-lpad,time+rpad,ztrans=ztrans)
             for chan in chans:
-                ax.plot(xs-time, data[chan,:]+(sig_yoff*(chan-min(chans)))+(i*trial_yoff),
-                        color = clr[chan])
+                ax.plot(xs-time, 
+                        data[chan,:]+(sig_yoff*(chan-min(chans)))+(i*trial_yoff),
+                        color = clr[chan],**plt_args)
         return (f,ax)
 
     def OscPanel(self,start,stop,wires,EMG_chns=None):
@@ -571,9 +558,9 @@ class TDTNex(object):
             axar[i].plot(xs, pNeu[wn-1,:],color='black',linewidth = 0.75)
             print(min(xs),max(xs))
             axar[i].set_xlim(min(xs),(max(xs)-min(xs))*1.25+min(xs))
-            nm_units_here = wg[wg.TDTts.between(*times)]['SC'].nunique()
+            nm_units_here = wg[wg.TDTts.between(*times)]['NEXSC'].nunique()
             SC_cnt = 0
-            for ii,(sc,g) in enumerate(wg.groupby('SC')):
+            for ii,(sc,g) in enumerate(wg.groupby('NEXSC')):
                 if sc==0:
                     continue
                 g_mask = g.TDTts.between(*times)
