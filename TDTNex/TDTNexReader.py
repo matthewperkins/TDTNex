@@ -47,6 +47,21 @@ class TDTNex(object):
         except AttributeError:
             self.EMG = None
         self.seg = self.nex.read_segment()
+        # now have to deal with name differences in the default snip and streams names between synapse and openex.
+        if 'eNeu' not in self.tdt.snips.keys():
+            # see if eNe1 in keys
+            if 'eNe1' in self.tdt.snips.keys():
+                print('using eNe1 as snips name')
+                self.tdt.snips.eNeu = self.tdt.snips.eNe1
+            else:
+                raise ValueError("snips name is no good.")
+        if 'pNeu' not in self.tdt.streams.keys():
+            # see if pNe1 in keys
+            if 'pNe1' in self.tdt.streams.keys():
+                print('using pNe1 as snips name')
+                self.tdt.streams.pNeu = self.tdt.streams.pNe1
+            else:
+                raise ValueError("stream Neu name is no good.")
         self._make_event_df() # side effect to add df to self.
         self._make_NexSort_df() # side-effect function add df to self
         self._make_Unit_df() # side-effect function add df to self
@@ -267,7 +282,8 @@ class TDTNex(object):
     def PlotUnitRaster(self,wire,sc,times,lpad,rpad,hist=True,
                        bin_width=0.1,hist_yscale=None, 
                        lwds=1,lineoff=0.8,linelen=0.8,
-                       inset_yscale=None,raster_color='black',plt_rand=False):
+                       inset_yscale=None,raster_color='black',
+                       plt_rand=False,addLabel = True,wv_lw = 0.25):
         evnts, evntsArray,raster_segs = self.UnitRaster(wire,sc,times,lpad,rpad)
         nsnips = len(evntsArray)
         if nsnips<1:
@@ -290,10 +306,10 @@ class TDTNex(object):
                             lineoffsets = lineoff, color = 'black')
         # have to do the inset axes, histogram
         wf_ax.patch.set_alpha(0.02)
-        raster_snips = LineCollection(raster_segs, linewidths=0.25,
+        raster_snips = LineCollection(raster_segs, linewidths=wv_lw,
                                 colors=raster_color, 
                                 linestyle='solid')
-        rand_snips = LineCollection(random_segs, linewidths=0.25,
+        rand_snips = LineCollection(random_segs, linewidths=wv_lw,
                                 colors='blue', 
                                 linestyle='solid')
         if plt_rand:
@@ -316,7 +332,8 @@ class TDTNex(object):
         raster_ax.set_xlim(-lpad,rpad)
         raster_ax.set_xlabel("time (s)")
         raster_ax.set_ylabel("trail num.")
-        f.text(0.1,0.85,"w:%s,sc:%s" % (wire,sc),transform = f.transFigure)
+        if addLabel:
+            f.text(0.1,0.85,"w:%s,sc:%s" % (wire,sc),transform = f.transFigure)
         f.set_size_inches(4,4)
         return f, (hist_ax, raster_ax, wf_ax)
         
@@ -400,7 +417,7 @@ class TDTNex(object):
         f.set_size_inches(10,10)
         return f
 
-    def GetWaves(self,wire,sc,start,stop):
+    def GetWaves(self,wire,sc,start,stop,maxnwvs='all'):
         _unitdf = self.unitdf.reset_index().set_index(['wire','NEXSC'])
         g = _unitdf.loc[(wire,sc)]
         times = (start,stop)
@@ -409,7 +426,13 @@ class TDTNex(object):
         if n_wvs==0:
             return None
         else:
-            return self.waveforms[(wire,sc)][g_mask,:]
+            if maxnwvs=='all':
+                return self.waveforms[(wire,sc)][g_mask,:]
+            else:
+                if maxnwvs>n_wvs:
+                    maxnwvs=n_wvs
+                _slct = np.random.randint(0,n_wvs-1,maxnwvs)
+                return self.waveforms[(wire,sc)][g_mask,:][_slct]
 
     def SpikeTriggeredEMG(self, wire, sortcode,
                           DigaChan=1,MastChan=2,
@@ -467,6 +490,7 @@ class TDTNex(object):
         mas_ar = np.zeros((dp_lpad+dp_rpad,nAvg))
 
         # iterate through the spike times and construct a spike triggered average for the convolved EMG
+        # maybe we can speed this up by reshaping and then convolving 
         for spk_cnt,(i,row) in enumerate(row_iter):
             idx = row.EMGidx
             # skip the spike at the beginning and the end of the record that I won't be able to average.

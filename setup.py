@@ -16,7 +16,7 @@ setuptools.setup(
     install_requires=['pandas',
                       'numpy',
                       'matplotlib',
-                      'tdt==0.3.6',
+                      'tdt',
                       'neo'],
     classifiers=[
         "Programming Language :: Python :: 3",
