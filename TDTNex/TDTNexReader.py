@@ -42,6 +42,7 @@ class TDTNex(object):
         self._nex_fp = nex_file_path
         self.tdt = tdt.read_block(self._tdt_fp)
         self.nex = NeuroExplorerIO(self._nex_fp)
+        self._tdt_dur = self.tdt.info.duration.total_seconds()
         try:
             self.EMG = self.tdt.streams.EMGx.data
         except AttributeError:
@@ -336,7 +337,6 @@ class TDTNex(object):
             f.text(0.1,0.85,"w:%s,sc:%s" % (wire,sc),transform = f.transFigure)
         f.set_size_inches(4,4)
         return f, (hist_ax, raster_ax, wf_ax)
-        
             
     def AllUnitRasters(self,times,lpad,rpad,hist=True,bin_width = 0.1,fndec=None,
                        hist_yscale=None, lwds = 1, lineoff = 0.8,linelen = 0.8,
@@ -465,7 +465,9 @@ class TDTNex(object):
         g = self.unitdf.reset_index().groupby(['wire','NEXSC']).get_group((wire,sortcode))
         # if there are no item buckets, set iter to all rows.
         if time_buckets is None:
-            row_iter = g.iterrows()
+            # have to drop spikes at beginning and end of the recording that I can not average
+            times = (g_masked['TDTts'].values)
+            times = times[(times>lpad)&(times<self._tdt_dur-rpad)]
             print("w:%02d sc:%d, %d spikes for averaging" % (wire,sortcode,len(g)))
             if len(g)<3:
                 print("too few spikes %d %d" % (wire,sortcode))
@@ -482,24 +484,30 @@ class TDTNex(object):
                 print("too few spikes %d %d" % (wire,sortcode))
                 return None
             print("w:%02d sc:%d, %d spikes for averaging" % (wire,sortcode,nAvg))
-            row_iter = g[_mask].iterrows()
+            times = g[_mask,'TDTts'].values
+            times = times[(times>lpad)&(times<self._tdt_dur-rpad)]
             f,ax = plt.subplots(1,1)
 
-        # alloc array for EMG avg
-        dig_ar = np.zeros((dp_lpad+dp_rpad,nAvg))
-        mas_ar = np.zeros((dp_lpad+dp_rpad,nAvg))
+        nsamples = dp_lpad+dp_rpad
 
-        # iterate through the spike times and construct a spike triggered average for the convolved EMG
-        # maybe we can speed this up by reshaping and then convolving 
-        for spk_cnt,(i,row) in enumerate(row_iter):
-            idx = row.EMGidx
-            # skip the spike at the beginning and the end of the record that I won't be able to average.
-            if (idx-dp_lpad)<0:
-                continue
-            if (idx+dp_rpad)>=max(self.EMG.shape):
-                continue
-            dig_ar[:,spk_cnt]=(digRC[int(idx)-dp_lpad:int(idx)+dp_rpad])
-            mas_ar[:,spk_cnt]=(masRC[int(idx)-dp_lpad:int(idx)+dp_rpad])
+        # # Create a vector from 0 up to nsamples
+        sample_idx = np.arange(nsamples)
+
+        ## drop spike times that I will not be able to average around 
+        ## (i.e. clipped by beginning and end of file)
+
+        # # Calculate the index of the first sample for each chunk
+        # # Require integers, because it will be used for indexing
+        start_idx = ((times - lpad) * fs).astype(int)
+
+        # # Use broadcasting to create an array with indices
+        # # Each row contains consecutive indices for each chunk
+        idx = start_idx[:, None] + sample_idx[None, :]
+
+        # # Get all the chunks using fancy indexing
+        dig_ar = self.EMG[DigaChan,idx]
+        mas_ar = self.EMG[MastChan,idx]
+
         ax.plot(np.linspace(-lpad,rpad,len(dig_ar)),dig_ar.mean(axis=1),label = 'digastric',**EMG_plt_args['digastric'])
         ax.plot(np.linspace(-lpad,rpad,len(mas_ar)),mas_ar.mean(axis=1),label = 'maseter',**EMG_plt_args['maseter'])
         if plt_stderr:
