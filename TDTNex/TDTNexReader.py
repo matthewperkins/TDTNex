@@ -319,6 +319,12 @@ class TDTNex(object):
         # now would like to add a patch if there are event offsets
         if time_offsets is not None:
             assert(len(times)==len(time_offsets)),"Length of Time Offsets %d, is different than that of Times %d" % (len(times),len(time_offsets))
+            from matplotlib.patches import Rectangle
+            # this maybe slow for > 200 events
+            for _i, (_t,off) in enumerate(zip(times,time_offsets)):
+                _r= Rectangle((0,(lineoff*_i)-linelen/2),off-_t,lineoff,
+                              color = 'blue',alpha = 0.6, ec = 'None')
+                raster_ax.add_patch(_r)
             
                                                                                                                      
         # have to do the inset axes, histogram
@@ -354,7 +360,8 @@ class TDTNex(object):
         f.set_size_inches(4,4)
         return f, (hist_ax, raster_ax, wf_ax), (bh/bin_width, bx)
             
-    def AllUnitRasters(self,times,lpad,rpad,hist=True,bin_width = 0.1,fndec=None,
+    def AllUnitRasters(self,times,lpad,rpad,hist=True,
+                       time_offsets=None, bin_width = 0.1,fndec=None,
                        hist_yscale=None, lwds = 1, lineoff = 0.8,linelen = 0.8,
                        inset_yscale=None, raster_color='black',fntitle=False,frmt='png',plt_dir=None):
         # use TDT time, all in seconds
@@ -364,8 +371,13 @@ class TDTNex(object):
         for (wire, sc),g  in self.unitdf.groupby(['wire','NEXSC']):
             if sc==0:
                 continue
-            f,(hist_ax,raster_ax,wf_ax), (u_freq, bx) = self.PlotUnitRaster(wire,sc,times,lpad,rpad,hist,bin_width,hist_yscale,
-                                                                                 lwds,lineoff,linelen,inset_yscale,raster_color)
+            f,(hist_ax,raster_ax,wf_ax), (u_freq, bx) = self.PlotUnitRaster(wire,sc,times,lpad,rpad,
+                                                                            time_offsets=time_offsets,
+                                                                            hist=hist,bin_width=bin_width,
+                                                                            hist_yscale=hist_yscale,
+                                                                            lwds=lwds,lineoff=lineoff,
+                                                                            linelen=linelen,inset_yscale=inset_yscale,
+                                                                            raster_color=raster_color)
             if f is None:
                 continue
             if fndec is None:
