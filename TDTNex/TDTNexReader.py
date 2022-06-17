@@ -304,6 +304,10 @@ class TDTNex(object):
         f= plt.figure()
         raster_ax = plt.axes([0.15,0.15,0.6,0.6])
         hist_ax = plt.axes([0.15,0.75,0.6,0.25])
+        # try sharing the x axis of the raster and the histogram
+        raster_ax.get_shared_x_axes().join(hist_ax, raster_ax)
+        hist_ax.set_xticklabels([])
+        # then add the waveform axes
         wf_ax = plt.axes([0.75,0.75,0.25,0.25])
         # preindex a segs array for the random line collection
         totsnips = len(self.unitdf.loc[(wire,sc),'TDTts'])
@@ -470,7 +474,7 @@ class TDTNex(object):
                           convolve_s = None,pltdir = '.',**kwargs):
         """"""
         if 'EMGpltargs' in kwargs.keys():
-            EMG_plt_args = args['EMGpltargs']
+            EMG_plt_args = kwargs['EMGpltargs']
         else:
             EMG_plt_args = {'digastric':{'color':'black'},
                             'maseter':{'color':'red'}}
@@ -598,6 +602,202 @@ class TDTNex(object):
 
         f.suptitle("w%02sc%d,N=%d" % (wire,sortcode,nAvg))
         f.savefig(os.path.join(pltdir,"SpikeTriggeredEMG_Wire%02dSC%d.png" % (wire,sortcode)),
+                  dpi = 300,transparent=True)
+        return f
+
+    def SpikeTriggeredStream(self, wire, sortcode,
+                             StreamName, StreamIdx=None,
+                             MaxN=50000,
+                             lpad=0.2,rpad=0.2, 
+                             time_buckets = None,
+                             plt_stderr=True, ylim=False,
+                             convolve_s = None,pltdir = '.',**kwargs):
+        """"""
+        if 'plt_args' in kwargs.keys():
+            plt_args = kwargs['plt_args']
+        else:
+            plt_args = {'color':'black'}
+
+        fs = self.tdt.streams[StreamName].fs
+        # check the dimensionality of the stream
+        if len(self.tdt.streams[StreamName].data.shape)==1:
+            data = self.tdt.streams[StreamName].data
+            # set the stream Idx to 0, for ease formating output later
+            StreamIdx=0
+        elif len(self.tdt.streams[StreamName].data.shape)==2:
+            assert(StreamIdx is not None),"Stream has %d dim, must give an index to one dim" % self.tdt.streams[StreamName].data.shape[0]
+            data = self.tdt.streams[StreamName].data[StreamIdx,:]
+        # raw data option
+        if convolve_s is None:        
+            dataRC = zscore(data)
+        else:
+            dataRC = zscore(np.convolve(np.abs(data),
+                            np.ones((int(convolve_s*fs),))/int(convolve_s*fs),mode = 'same'))
+        os.makedirs(pltdir, exist_ok=True)
+
+        dp_lpad = int(lpad*fs)
+        dp_rpad = int(rpad*fs)
+        nsamples = dp_lpad+dp_rpad
+
+        # allow to select some spikes for restricted time buckets, i.e. only spike 15 seconds after taste exposure.
+        g = self.unitdf.reset_index().groupby(['wire','NEXSC']).get_group((wire,sortcode))
+        # if there are no item buckets, set iter to all rows.
+        if time_buckets is None:
+            # have to drop spikes at beginning and end of the recording that I can not average
+            times = g['TDTts'].values
+            times = times[(times>lpad*1.1)&(times<self._tdt_dur-rpad*1.1)]
+            print("w:%02d sc:%d, %d spikes for averaging" % (wire,sortcode,len(g)))
+            if len(g)<3:
+                print("too few spikes %d %d" % (wire,sortcode))
+                return None
+            nAvg = len(g)
+            f,ax = plt.subplots(1,1)
+        else:
+            _mask = np.zeros((len(g),),dtype = np.bool)
+            for S,E in time_buckets:
+                _mask = _mask | g.TDTts.between(S,E)
+            # if there are no spikes in any of the buckets, give up return none:
+            nAvg = _mask.sum()
+            if _mask.sum()<3:
+                print("too few spikes %d %d" % (wire,sortcode))
+                return None
+            print("w:%02d sc:%d, %d spikes for averaging" % (wire,sortcode,nAvg))
+            times = g.loc[_mask,'TDTts'].values
+            times = times[(times>lpad)&(times<self._tdt_dur-rpad)]
+            f,ax = plt.subplots(1,1)
+
+        # if there are a ton of spikes, randomly select times upto MaxN
+        if len(times)>MaxN:
+            from numpy.random import default_rng 
+            rng = default_rng()
+            times = rng.choice(times,MaxN,replace=False)
+
+        # # Create a vector from 0 up to nsamples
+        sample_idx = np.arange(nsamples)
+
+        # # Calculate the index of the first sample for each chunk
+        # # Require integers, because it will be used for indexing
+
+        ## drop spike times that I will not be able to average around 
+        ## (i.e. clipped by beginning and end of file)
+        start_idx = ((times - lpad) * fs).astype(int)
+        start_idx = start_idx[(start_idx+nsamples)<len(dataRC)-1]
+
+        # # Use broadcasting to create an array with indices
+        # # Each row contains consecutive indices for each chunk
+        idx = start_idx[:, None] + sample_idx[None, :]
+        
+        # # Get all the chunks using fancy indexing
+        print(idx.shape)
+        # hey
+        data_ar = dataRC[idx]
+
+        ax.plot(np.linspace(-lpad,rpad,nsamples),data_ar.mean(axis=0),
+                label = "%s %d" % (StreamName,StreamIdx),**plt_args)
+        if plt_stderr:
+            ax.fill_between(np.linspace(-lpad,rpad,nsamples),
+                            data_ar.mean(axis=0)-sem(data_ar,axis=0),
+                            data_ar.mean(axis=0)+sem(data_ar,axis=0),
+                            alpha = 0.4,**plt_args)
+        if ylim:
+            ax.set_ylim(ylim)
+
+        axins = plt.axes([0.75,0.75,0.2,0.2])
+        f.add_axes(axins)
+        axins.patch.set_alpha(0.02)
+        # want to select waves for the inset axis that are from the period of time depicted in the raster
+        # plot at most 50 waves, less if there are fewer spikes
+        all_wvs = self.waveforms[(wire,sortcode)]
+        num_rnd_wvs = len(all_wvs)-1 if (len(all_wvs)<50) else 50
+        # plot a random selection from all the waves
+        rnd_wvs = all_wvs[np.random.randint(0,len(all_wvs),num_rnd_wvs),:]
+        rnd_segs = np.zeros(rnd_wvs.shape+(2,))
+        rnd_segs[:,:,1] = rnd_wvs
+        rnd_segs[:,:,0] = np.r_[0:30]
+        rnd_snips = LineCollection(rnd_segs, linewidths=0.25,
+                                    colors='blue', linestyle='solid')
+        axins.add_collection(rnd_snips)
+        if time_buckets is not None:
+            # plot the raster waves
+            raster_wvs = self.waveforms[(wire,sortcode)][_mask]
+            raster_segs = np.zeros(raster_wvs.shape + (2,))
+            raster_segs[:,:,1] = raster_wvs
+            raster_segs[:,:,0] = np.r_[0:30]
+            raster_snips = LineCollection(raster_segs, linewidths=0.25,
+                                            colors='black', linestyle='solid')
+            axins.add_collection(raster_snips)
+        axins.set_zorder(10)
+        ymin, ymax = np.min(rnd_segs[:,:,1]),np.max(rnd_segs[:,:,1])
+        xmin, xmax = np.min(rnd_segs[:,:,0]),np.max(rnd_segs[:,:,0])
+        axins.set_ylim(ymin,ymax)
+        axins.set_xlim(xmin,xmax)
+        axins.text(0,0.95,"w%02sc%d" % (wire,sortcode),transform = axins.transAxes)
+        [x.set_visible(False) for x in [axins.xaxis, axins.yaxis]]
+
+        f.suptitle("w%02sc%d,N=%d,subsample=%d" % (wire,sortcode,nAvg,len(times)))
+        f.savefig(os.path.join(pltdir,"SpikeTriggered_%s_Idx%d_%02dSC%d.png" % (StreamName, StreamIdx,wire,sortcode)),
+                  dpi = 300,transparent=True)
+        return f
+
+    def EventTriggeredStream(self, EventTimes, EventName,
+                             StreamName, StreamIdx=None,
+                             lpad=0.2,rpad=0.2, 
+                             time_buckets = None,
+                             plt_stderr=True, ylim=False,
+                             convolve_s = None,pltdir = '.',**kwargs):
+        """"""
+        fs = self.tdt.streams[StreamName].fs
+        # check the dimensionality of the stream
+        if len(self.tdt.streams[StreamName].data.shape)==1:
+            data = self.tdt.streams[StreamName].data
+            # set the stream Idx to 0, for ease formating output later
+            StreamIdx=0
+        elif len(self.tdt.streams[StreamName].data.shape)==2:
+            assert(StreamIdx is not None),"Stream has %d dim, must give an index to one dim" % self.tdt.streams[StreamName].data.shape[0]
+            data = self.tdt.streams[StreamName].data[StreamIdx,:]
+        # raw data option
+        if convolve_s is None:        
+            dataRC = zscore(data)
+        else:
+            dataRC = zscore(np.convolve(np.abs(data),
+                            np.ones((int(convolve_s*fs),))/int(convolve_s*fs),mode = 'same'))
+        os.makedirs(pltdir, exist_ok=True)
+        dp_lpad = int(lpad*fs)
+        dp_rpad = int(rpad*fs)
+        nAvg = len(EventTimes)
+        f,ax = plt.subplots(1,1)
+        nsamples = dp_lpad+dp_rpad
+
+        # # Create a vector from 0 up to nsamples
+        sample_idx = np.arange(nsamples)
+
+        # # Calculate the index of the first sample for each chunk
+        # # Require integers, because it will be used for indexing
+
+        ## drop spike times that I will not be able to average around 
+        ## (i.e. clipped by beginning and end of file)
+        start_idx = ((EventTimes - lpad) * fs).astype(int)
+        start_idx = start_idx[(start_idx+nsamples)<len(dataRC)-1]
+
+        # # Use broadcasting to create an array with indices
+        # # Each row contains consecutive indices for each chunk
+        idx = start_idx[:, None] + sample_idx[None, :]
+        
+        # # Get all the chunks using fancy indexing
+        print(idx.shape)
+        data_ar = dataRC[idx]
+        ax.plot(np.linspace(-lpad,rpad,nsamples),data_ar.mean(axis=0),
+                label = "%s %d" % (StreamName,StreamIdx),**plt_args)
+        if plt_stderr:
+            ax.fill_between(np.linspace(-lpad,rpad,nsamples),
+                            data_ar.mean(axis=0)-sem(data_ar,axis=0),
+                            data_ar.mean(axis=0)+sem(data_ar,axis=0),
+                            alpha = 0.4,**plt_args)
+        if ylim:
+            ax.set_ylim(ylim)
+
+        f.suptitle("Event %s,N=%d" % (EventName,nAvg))
+        f.savefig(os.path.join(pltdir,"Event_%s_Triggered_%s_Idx%d.png" % (EventName,StreamName,StreamIdx)),
                   dpi = 300,transparent=True)
         return f
 
