@@ -273,19 +273,22 @@ class TDTNex(object):
         except TypeError:
             times=[times]
         nsnips = int(np.array([g.TDTts.between(t-lpad,t+rpad).sum() for t in times]).sum())
+        if nsnips<1:
+            print("fewer than 1 snips")
+            return (None, None, None, (None, None))
         raster_segs = np.zeros((nsnips,30,2))
         # do the xs on the raster_segs collection just 0-30
         raster_segs[:,:,0]=np.r_[0:30]
         evntsArray = np.zeros((nsnips,))
         evnts = []
-        rates = []
+        rates = np.zeros((len(times),len(bins)-1))
         _seg_idx=0
-        for t in times:
+        for ii,t in enumerate(times):
             _mask = g.TDTts.between(t-lpad,t+rpad)
             raster_segs[_seg_idx:_seg_idx+_mask.sum(),:,1]=self.waveforms[(wire,sc)][_mask,:]
             evnts.append(g[_mask]['TDTts'].values-t) # subtract t shift to zero
-            h,bx = np.histogram(g[_mask]['TDTts'].values-t,bins = np.r_[-lpad:0:bin_width,0:rpad+(bin_width*0.01):bin_width])
-            rates.append(h/bin_width)
+            h,bx = np.histogram(g[_mask]['TDTts'].values-t,bins = bins)
+            rates[ii] = (h/bin_width)
             evntsArray[_seg_idx:_seg_idx+_mask.sum()]=evnts[-1]
             _seg_idx+=_mask.sum()
         return(evnts,evntsArray,raster_segs,(rates,bx))
@@ -296,7 +299,10 @@ class TDTNex(object):
                        lwds=1,lineoff=0.8,linelen=0.8,
                        inset_yscale=None,raster_color='black',
                        plt_rand=False,addLabel = True,wv_lw = 0.25):
-        evnts, evntsArray,raster_segs,rates = self.UnitRaster(wire,sc,times,lpad,rpad)
+        evnts, evntsArray,raster_segs,(rates,bx) = self.UnitRaster(wire,sc,times,lpad,rpad)
+        if evntsArray is None:
+            print("fewer than 1 snips")
+            return None, (None, None, None), (None, None)
         nsnips = len(evntsArray)
         if nsnips<1:
             print("fewer than 1 snips")
@@ -362,7 +368,7 @@ class TDTNex(object):
         if addLabel:
             f.text(0.1,0.85,"w:%s,sc:%s" % (wire,sc),transform = f.transFigure)
         f.set_size_inches(4,4)
-        return f, (hist_ax, raster_ax, wf_ax), (bh/bin_width, bx)
+        return f, (hist_ax, raster_ax, wf_ax), (bh/bin_width/len(times), bx)
             
     def AllUnitRasters(self,times,lpad,rpad,hist=True,
                        time_offsets=None, bin_width = 0.1,fndec=None,
@@ -467,6 +473,7 @@ class TDTNex(object):
                 return self.waveforms[(wire,sc)][g_mask,:][_slct]
 
     def SpikeTriggeredEMG(self, wire, sortcode,
+                          MaxN=50000,
                           DigaChan=1,MastChan=2,
                           lpad=0.2,rpad=0.2, 
                           time_buckets = None,
@@ -761,6 +768,11 @@ class TDTNex(object):
         else:
             dataRC = zscore(np.convolve(np.abs(data),
                             np.ones((int(convolve_s*fs),))/int(convolve_s*fs),mode = 'same'))
+        # plot kwargs?
+        if 'plt_args' not in kwargs.keys():
+            plt_args = {}
+        else:
+            plt_args = kwargs['plt_args']
         os.makedirs(pltdir, exist_ok=True)
         dp_lpad = int(lpad*fs)
         dp_rpad = int(rpad*fs)
@@ -922,7 +934,9 @@ class TDTNex(object):
                 g_mask = g.TDTts.between(*times)
                 if g_mask.sum()>0:
                     axar[i].eventplot(g[g_mask]['TDTts'].values, 
-                                      lineoffsets=max(pNeu[wn-1,:])+(ii*20),linelength = 20,
+                                      lineoffsets=(0.3*(SC_count/nm_units_here))+0.65,
+                                      linelengths=0.3/nm_units_here,
+                                      transform = axar[i].get_xaxis_transform(),
                                       color = cmap(SC_cnt/nm_units_here))
                     segs = np.zeros(self.waveforms[(wn,sc)][g_mask,:].shape+(2,))
                     segs[:,:,0] = np.r_[0:30]
