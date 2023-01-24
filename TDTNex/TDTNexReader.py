@@ -137,9 +137,9 @@ class TDTNex(object):
         len_ev_df = np.array([len(v.onset) for k,v in self.tdt.epocs.items()]).sum().astype('int')
         print(len_ev_df)
         ev_df = pd.DataFrame({'name':['NA']*len_ev_df,
-                              'onset':np.zeros((len_ev_df,),dtype=np.float),
-                              'offset':np.zeros((len_ev_df,),dtype=np.float),
-                              'data':np.zeros((len_ev_df,),dtype=np.float)
+                              'onset':np.zeros((len_ev_df,),dtype=np.float64),
+                              'offset':np.zeros((len_ev_df,),dtype=np.float64),
+                              'data':np.zeros((len_ev_df,),dtype=np.float64)
                               })
         _idx = 0
         # because some of the offsets are not recorded in the tdt file,
@@ -168,13 +168,13 @@ class TDTNex(object):
 
         # now create a dataframe for the spikes    
         frlen = len(tdt.snips.eNeu.ts)
-        unitdf = pd.DataFrame({'wire':np.zeros((frlen,),dtype=np.int),
-                            'TankSC':np.zeros((frlen,),dtype=np.int), # use -1 for unsorted
-                            'NEXSC':np.zeros((frlen,),dtype=np.int), # use -1 for unsorted
-                            'TDTts':np.zeros((frlen,),dtype=np.float),
-                            'TDTwvidx':np.zeros((frlen,),dtype=np.int),
-                            'EMGidx':np.zeros((frlen,),dtype=np.int),
-                            'pNeuidx':np.zeros((frlen,),dtype=np.int)})
+        unitdf = pd.DataFrame({'wire':np.zeros((frlen,),dtype=np.int64),
+                            'TankSC':np.zeros((frlen,),dtype=np.int64), # use -1 for unsorted
+                            'NEXSC':np.zeros((frlen,),dtype=np.int64), # use -1 for unsorted
+                            'TDTts':np.zeros((frlen,),dtype=np.float64),
+                            'TDTwvidx':np.zeros((frlen,),dtype=np.int64),
+                            'EMGidx':np.zeros((frlen,),dtype=np.int64),
+                            'pNeuidx':np.zeros((frlen,),dtype=np.int64)})
 
 
         # fill in the TDTts and NEOts by wire
@@ -244,10 +244,10 @@ class TDTNex(object):
         assert nNexSpikes==len(tdt.snips.eNeu.ts),"num spikes in NexFile % is different from in TDT file (%d)" % (nNexSpikes, len(tdt.snips.eNeu.ts))
 
         # spike train data frame: wire, sort_code, st_num with in segment
-        NexSorted_df = pd.DataFrame({'wire':np.zeros((nNexSpikes,),dtype=np.int),
-                                     'SC':np.zeros((nNexSpikes,),dtype=np.int,),
-                                     'st_num':np.zeros((nNexSpikes,),dtype=np.int,),
-                                     'st':np.zeros((nNexSpikes,),dtype=np.float,)})
+        NexSorted_df = pd.DataFrame({'wire':np.zeros((nNexSpikes,),dtype=np.int64),
+                                     'SC':np.zeros((nNexSpikes,),dtype=np.int64,),
+                                     'st_num':np.zeros((nNexSpikes,),dtype=np.int64,),
+                                     'st':np.zeros((nNexSpikes,),dtype=np.float64,)})
         _idx = 0
         for st_num, st in real_spktrns:
             wire = int(st.name[3:5])
