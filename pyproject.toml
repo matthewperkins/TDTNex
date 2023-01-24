@@ -1,0 +1,27 @@
+[project]
+name = "TDTNex"
+version = "0.2.5"
+authors = [
+  { name="Matthew Perkins", email="matthew.perkins@mssm.edu" },
+  ]
+  description = "To add OfflineSorter codes to TDT blocks"
+  readme = "README.md"
+  requires-python = ">=3.7"
+  classifiers = [
+      "",
+	      ]
+dependencies = [
+	     'pandas',
+	     'numpy',
+	     'matplotlib',
+	     'tdt',
+	     'neo',
+	     ]	      
+
+[project.urls]
+"Homepage" = "https://github.com/matthewperkins/TDTNex"
+"Bug Tracker" = "https://github.com/matthewperkins/TDTNex/issues"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
