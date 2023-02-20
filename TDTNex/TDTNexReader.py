@@ -275,7 +275,6 @@ class TDTNex(object):
         nsnips = int(np.array([g.TDTts.between(t-lpad,t+rpad).sum() for t in times]).sum())
         if nsnips<1:
             print("fewer than 1 snips")
-            return (None, None, None, (None, None))
         raster_segs = np.zeros((nsnips,30,2))
         # do the xs on the raster_segs collection just 0-30
         raster_segs[:,:,0]=np.r_[0:30]
@@ -300,7 +299,7 @@ class TDTNex(object):
                        inset_yscale=None,raster_color='black',
                        plt_rand=False,addLabel = True,wv_lw = 0.25):
         evnts, evntsArray,raster_segs,(rates,bx) = self.UnitRaster(wire,sc,times,lpad,rpad)
-        if evntsArray is None:
+        if np.size(evntsArray)==0:
             print("fewer than 1 snips")
             return None, (None, None, None), (None, None)
         nsnips = len(evntsArray)
