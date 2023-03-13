@@ -253,7 +253,7 @@ class TDTNex(object):
             # need to pull out the waves here.
             _wvs = self.tdt.snips.eNeu.data[g.TDTwvidx.values]
             waveforms[(wn,nexsc)]=np.copy(_wvs)
-        self.waveform = waveforms
+        self.waveforms = waveforms
         for k in self.waveforms:
             len_wv+=len(self.waveforms[k])
         print("len waveforms post drop %d" % len_wv)
