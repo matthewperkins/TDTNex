@@ -11,6 +11,7 @@ from scipy.stats import mode
 import os
 import tdt
 from pandas import IndexSlice as pidx
+from numba import njit
 import pandas as pd
 from scipy.stats import zscore, mode, sem
 
@@ -25,7 +26,19 @@ from scipy.stats import zscore, mode, sem
 ## values are EMGidx, pNueidx, nextime, tdt_time, and a waveform array?
 # read the data in wire order frome the tdt, for each time, calculate the nex time
 # grouby by wire, iterate through the spiketrains for each wire, use timestamp as a key to assign the sort code
-# wire 
+# wire
+
+@njit
+def find_artifact_idxs(spiketimes,artifact_times,window = 0.0008):
+    # preindex array
+    spikes_to_drop = np.repeat(np.array([-1],dtype=np.int_),10000)
+    counter = 0
+    for artifact_time in artifact_times:
+        artifact_spikes = np.where(np.abs(spiketimes - artifact_time)<window)[0]
+        spikes_to_drop[counter:counter+len(artifact_spikes)]=artifact_spikes
+        counter+=len(artifact_spikes)
+    return np.sort(spikes_to_drop[0:counter])
+
 class TDTNex(object):
     def __init__(self, tdt_file_path, nex_file_path):
         """For the alignment and manipulation of TDT data files with manually cluster cutted data from Offline sorter,
@@ -183,7 +196,7 @@ class TDTNex(object):
         # if there is no EMGx just leave as zeros
         if self.EMG is not None:
             EMGfs = tdt.streams.EMGx.fs
-        for wire in np.r_[1:17]:
+        for wire in np.unique(self.tdt.snips.eNeu.chan.flatten()):
             _wt = tdt.snips.eNeu.ts[np.argwhere(tdt.snips.eNeu.chan.flatten()==wire).flatten()].flatten()
             _nexsc = tdt.snips.eNeu.nexsortcode[np.argwhere(tdt.snips.eNeu.chan.flatten()==wire).flatten()].flatten()
             _tanksc = tdt.snips.eNeu.sortcode[np.argwhere(tdt.snips.eNeu.chan.flatten()==wire).flatten()].flatten()
@@ -217,6 +230,35 @@ class TDTNex(object):
                 nunits+=1
         self.nunits = nunits
         self.waveforms = waveforms
+
+    def drop_artifacts(self, Times, window = 0.0008):
+        #def drop_opto_artifacts(UnitDf, Times, window=0.0008):
+        drop_ilocs = find_artifact_idxs(self.unitdf.TDTts.values, Times, window=window)
+        if np.size(drop_ilocs)!=0:
+            print("dropping %d spikes" % np.size(drop_ilocs))
+        keep_ilocs = np.setdiff1d(np.arange(len(self.unitdf)),drop_ilocs)
+        print("len unitdf pre drop %d" % len(self.unitdf))
+        dropped = self.unitdf.iloc[drop_ilocs]
+        self.unitdf = self.unitdf.iloc[keep_ilocs]
+        print("len unitdf post drop %d" % len(self.unitdf))
+        self.unitdf = self.unitdf.reset_index().set_index(['wire','NEXSC']).sort_index().copy()
+        len_wv = 0
+        for k in self.waveforms:
+            len_wv+=len(self.waveforms[k])
+        print("len waveforms pre drop %d" % len_wv)
+
+        # have to drop the waveforms too, just pull them in from the tdt object again:
+        waveforms = {}
+        for (wn,nexsc),g in self.unitdf.groupby(['wire','NEXSC']):
+            # need to pull out the waves here.
+            _wvs = self.tdt.snips.eNeu.data[g.TDTwvidx.values]
+            waveforms[(wn,nexsc)]=np.copy(_wvs)
+        self.waveform = waveforms
+        for k in self.waveforms:
+            len_wv+=len(self.waveforms[k])
+        print("len waveforms post drop %d" % len_wv)
+        self.unitdf = self.unitdf.reset_index().set_index(['wire','NEXSC']).sort_index().copy()
+        return dropped
 
     def _make_NexSort_df(self):
         tdt = self.tdt
