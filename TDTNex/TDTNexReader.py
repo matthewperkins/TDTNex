@@ -317,6 +317,7 @@ class TDTNex(object):
         nsnips = int(np.array([g.TDTts.between(t-lpad,t+rpad).sum() for t in times]).sum())
         if nsnips<1:
             print("fewer than 1 snips")
+            return (None,None,None,(None,None))
         raster_segs = np.zeros((nsnips,30,2))
         # do the xs on the raster_segs collection just 0-30
         raster_segs[:,:,0]=np.r_[0:30]
@@ -717,6 +718,7 @@ class TDTNex(object):
         # if there are a ton of spikes, randomly select times upto MaxN
         if len(times)>MaxN:
             from numpy.random import default_rng 
+
             rng = default_rng()
             times = rng.choice(times,MaxN,replace=False)
 
