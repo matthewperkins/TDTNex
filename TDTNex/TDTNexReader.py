@@ -39,6 +39,46 @@ def find_artifact_idxs(spiketimes,artifact_times,window = 0.0008):
         counter+=len(artifact_spikes)
     return np.sort(spikes_to_drop[0:counter])
 
+@njit
+def count_snips(event_times,unit_times,lpad,rpad):
+        nsnips = int(0)
+        for t in event_times:
+            nsnips+=np.sum((unit_times>(t-lpad))&(unit_times<(t+rpad)))
+        return nsnips
+
+@njit 
+def make_r_bins(bin_width,lpad,rpad):
+    left_side_bins = np.arange(0,-lpad,-bin_width,dtype = np.float_)[::-1]
+    right_side_bins = np.arange(bin_width,rpad,bin_width, dtype = np.float_)
+    bins = np.zeros(len(left_side_bins)+len(right_side_bins))
+    bins[0:len(left_side_bins)]=left_side_bins
+    bins[len(left_side_bins):]=right_side_bins
+    return bins
+
+@njit
+def make_raster(bin_width,nsnips,event_times,unit_times,lpad,rpad,waveforms):
+    # make the bins
+    bins = make_r_bins(bin_width,lpad,rpad)
+    raster_segs = np.zeros((nsnips,30,2))
+    # do the xs on the raster_segs collection just 0-30
+    raster_segs[:,:,0]=np.arange(30)
+    evntsArray = np.zeros((nsnips,))
+    evnts = []
+    rates = np.zeros((len(event_times),len(bins)-1))
+    _seg_idx=0
+    for ii,t in enumerate(event_times):
+        _mask = (unit_times>(t-lpad))&(unit_times<(t+rpad))
+        raster_segs[_seg_idx:_seg_idx+_mask.sum(),:,1]=waveforms[_mask,:]
+        #evnts.append(g[_mask]['TDTts'].values-t) # subtract t shift to zero
+        # apparently numba 0.45 handles lists njit, but must have strict homogenous types.
+        evnts.append(unit_times[_mask]-t) # subtract t shift to zero
+        #h,bx = np.histogram(g[_mask]['TDTts'].values-t,bins = bins)
+        h,bx = np.histogram(unit_times[_mask]-t,bins = bins)
+        rates[ii] = (h/bin_width)
+        evntsArray[_seg_idx:_seg_idx+_mask.sum()]=evnts[-1]
+        _seg_idx+=_mask.sum()
+    return (evnts,evntsArray,raster_segs,(rates,bx))
+    
 class TDTNex(object):
     def __init__(self, tdt_file_path, nex_file_path):
         """For the alignment and manipulation of TDT data files with manually cluster cutted data from Offline sorter,
@@ -92,9 +132,9 @@ class TDTNex(object):
         return(int(self.tdt.streams.EMGx.fs*ts))
     
     def pNeu(self,start=None,stop=None):
-        tdt_dur = self.tdt.info.duration.total_seconds()
+        pNeu_dur = self.tdt.streams.pNue.data.shape[1]/self.tdt.streams.pNeu.fs
         if start is not None:
-            if (start>0)&(start<=tdt_dur):
+            if (start>0)&(start<=pNeu_dur):
                 S = start
             else:
                 print('Start arg is bad, setting to 0')
@@ -102,25 +142,30 @@ class TDTNex(object):
         else:
             S = 0
         if stop is not None:
-            if ((stop>0)&(stop>start)&(stop<tdt_dur)):
+            if ((stop>0)&(stop>start)&(stop<pNeu_dur)):
                 E = stop
             else:
                 print('Stop arg is bad, setting to end of file')
-                E = tdt_dur
-                print(E,tdt_dur)
+                # I noticed that the end of the TDT record may not be accurately reflected
+                # between different streams of data!!!
+                # like some streams mayhave more points in them than others.
+                # is better to compute XS of data based on
+                #  number of points in the stream, and the fs
+                E = pNeu_dur
+                print(E,pNeu_dur)
         else:
-            E = tdt_dur
+            E = pNeu_dur
         Sidx,Eidx = self._ts_pNeu_idx(S),self._ts_pNeu_idx(E)
         data = self.tdt.streams.pNeu.data[:,Sidx:Eidx]
         xs = np.linspace(S,E,data.shape[1])
         return xs,data
 
     def EMGx(self,start=None,stop=None,ztrans=False):
-        tdt_dur = self.tdt.info.duration.total_seconds()
+        EMGx_dur = self.tdt.streams.EMGx.data.shape[1]/self.tdt.streams.EMGx.fs
         sig_mean = self.tdt.streams.EMGx.data.mean(axis=1)
         sig_std = self.tdt.streams.EMGx.data.std(axis=1)
         if start is not None:
-            if (start>0)&(start<=tdt_dur):
+            if (start>0)&(start<=EMGx_dur):
                 S = start
             else:
                 print('Start arg is bad, setting to 0')
@@ -128,14 +173,14 @@ class TDTNex(object):
         else:
             S = 0
         if stop is not None:
-            if ((stop>0)&(stop>start)&(stop<tdt_dur)):
+            if ((stop>0)&(stop>start)&(stop<EMGx_dur)):
                 E = stop
             else:
                 print('Stop arg is bad, setting to end of file')
-                E = tdt_dur
-                print(E,tdt_dur)
+                E = EMGx_dur
+                print(E,EMGx_dur)
         else:
-            E = tdt_dur
+            E = EMGx_dur
         Sidx,Eidx = self._ts_EMGx_idx(S),self._ts_EMGx_idx(E)
         data = np.copy(self.tdt.streams.EMGx.data[:,Sidx:Eidx])
         if ztrans is True:
@@ -302,43 +347,27 @@ class TDTNex(object):
         NexSorted_df.set_index(['wire','SC'],inplace=True)
         self.nex_df = NexSorted_df
         
-    def UnitRaster(self,wire,sc,times,lpad,rpad,bin_width=None):
+    def UnitRaster(self,wire,sc,event_times,lpad,rpad,bin_width=None):
         """Return a list of events, an array of all events, and set of waveform segments
         """
+        # clean up the signature to pass through to numba function
+        unit_times = self.unitdf.loc[(wire,sc),'TDTts'].values
+        waveforms = self.waveforms[(wire,sc)]
+        assert(type(event_times)==type(np.array([]))),"run your shit Matt, make it an array"
         if bin_width is None:
             bin_width = (lpad+rpad)/40
-        bins = np.r_[-lpad:0:bin_width,0:rpad+(bin_width*0.01):bin_width]
-
-        g = self.unitdf.groupby(['wire','NEXSC']).get_group((wire,sc))
-        try:
-            iter(times)
-        except TypeError:
-            times=[times]
-        nsnips = int(np.array([g.TDTts.between(t-lpad,t+rpad).sum() for t in times]).sum())
+        # count the snips, do this in a separate njit func, because njit cant type python's None
+        nsnips = count_snips(event_times,unit_times,lpad,rpad)
         if nsnips<1:
             print("fewer than 1 snips")
             return (None,None,None,(None,None))
-        raster_segs = np.zeros((nsnips,30,2))
-        # do the xs on the raster_segs collection just 0-30
-        raster_segs[:,:,0]=np.r_[0:30]
-        evntsArray = np.zeros((nsnips,))
-        evnts = []
-        rates = np.zeros((len(times),len(bins)-1))
-        _seg_idx=0
-        for ii,t in enumerate(times):
-            _mask = g.TDTts.between(t-lpad,t+rpad)
-            raster_segs[_seg_idx:_seg_idx+_mask.sum(),:,1]=self.waveforms[(wire,sc)][_mask,:]
-            evnts.append(g[_mask]['TDTts'].values-t) # subtract t shift to zero
-            h,bx = np.histogram(g[_mask]['TDTts'].values-t,bins = bins)
-            rates[ii] = (h/bin_width)
-            evntsArray[_seg_idx:_seg_idx+_mask.sum()]=evnts[-1]
-            _seg_idx+=_mask.sum()
-        return(evnts,evntsArray,raster_segs,(rates,bx))
+        evnts,evntsArray,raster_segs,(rates,bx) = make_raster(bin_width,nsnips,event_times,unit_times,lpad,rpad,waveforms)
+        return evnts,evntsArray,raster_segs,(rates,bx)
 
     def PlotUnitRaster(self,wire,sc,times,lpad,rpad,hist=True,
                        time_offsets = None,
                        bin_width=0.1,hist_yscale=None, 
-                       lwds=1,lineoff=0.8,linelen=0.8,
+                       lwds=1,lineoff=1,linelen=1,
                        inset_yscale=None,raster_color='black',
                        plt_rand=False,addLabel = True,wv_lw = 0.25):
         evnts, evntsArray,raster_segs,(rates,bx) = self.UnitRaster(wire,sc,times,lpad,rpad)
@@ -349,11 +378,11 @@ class TDTNex(object):
         if nsnips<1:
             print("fewer than 1 snips")
             return None, (None, None, None), (None, None)
-        f= plt.figure()
-        raster_ax = plt.axes([0.15,0.15,0.6,0.6])
-        hist_ax = plt.axes([0.15,0.75,0.6,0.25])
+        f,(raster_ax,hist_ax) = plt.subplots(2,1,sharex='all')
+        raster_ax.set_position([0.15,0.15,0.6,0.6])
+        hist_ax.set_position([0.15,0.75,0.6,0.25])
         # try sharing the x axis of the raster and the histogram
-        raster_ax.get_shared_x_axes().join(hist_ax, raster_ax)
+        # raster_ax.get_shared_x_axes().join(hist_ax, raster_ax)
         hist_ax.set_xticklabels([])
         # then add the waveform axes
         wf_ax = plt.axes([0.75,0.75,0.25,0.25])
@@ -397,7 +426,8 @@ class TDTNex(object):
             wf_ax.set_ylim(*inset_yscale)
         wf_ax.xaxis.set_visible(False)
         wf_ax.yaxis.set_visible(False)
-        bh,bx = np.histogram(evntsArray,bins = np.r_[-lpad:0:bin_width,0:rpad+(bin_width*0.01):bin_width])
+        bins = make_r_bins(bin_width,lpad,rpad)
+        bh,bx = np.histogram(evntsArray,bins = bins)
         hist_ax.bar(bx[0:-1],bh/len(times)/bin_width,width = bin_width, align='edge')
         hist_ax.set_ylabel("inst. freq Hz, %.2f" % bin_width)
         hist_ax.xaxis.set_visible(False)
@@ -977,7 +1007,7 @@ class TDTNex(object):
                 g_mask = g.TDTts.between(*times)
                 if g_mask.sum()>0:
                     axar[i].eventplot(g[g_mask]['TDTts'].values, 
-                                      lineoffsets=(0.3*(SC_count/nm_units_here))+0.65,
+                                      lineoffsets=(0.3*(SC_cnt/nm_units_here))+0.65,
                                       linelengths=0.3/nm_units_here,
                                       transform = axar[i].get_xaxis_transform(),
                                       color = cmap(SC_cnt/nm_units_here))
