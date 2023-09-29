@@ -88,7 +88,7 @@ class TDTNex(object):
         to the coordiinated unit dataframe. If the nearest frame is > 11 milliseconds away, is NA. Also, alignment of the files
         works by exact matching of time stamps, which is brittle, because there is some weird clock skew in the NEX file
         that comes out of OffLineSorter. This skew is measured, and the expected neotime stamps are created by multipyling
-        the TDT time stamps by the a coefficent. These expected time stamps are then rounded to 7 digits, and their
+        the TDT time stamps by the a coefficent. These expected time stamps areout then rounded to 7 digits, and their
         matching timestamp is looked for on the appropriate wire from the NEX signals. Base on my experience the precision 
         of the rounding changes a bit from file to file, and may need to be tweaked"""
         self._tdt_fp = tdt_file_path
@@ -97,7 +97,7 @@ class TDTNex(object):
         self.nex = NeuroExplorerIO(self._nex_fp)
         self._tdt_dur = self.tdt.info.duration.total_seconds()
         self._convolve_s = None # state stuff
-        self._digRC = None # state stuff
+        self._digRC = None # state stuff 
         self._masRC = None # state stuff
         try:
             self.EMG = self.tdt.streams.EMGx.data
@@ -371,19 +371,15 @@ class TDTNex(object):
                        inset_yscale=None,raster_color='black',
                        plt_rand=False,addLabel = True,wv_lw = 0.25):
         evnts, evntsArray,raster_segs,(rates,bx) = self.UnitRaster(wire,sc,times,lpad,rpad)
-        if np.size(evntsArray)==0:
-            print("fewer than 1 snips")
+        if evnts is None:
+            print("no snips")
             return None, (None, None, None), (None, None)
-        nsnips = len(evntsArray)
-        if nsnips<1:
-            print("fewer than 1 snips")
-            return None, (None, None, None), (None, None)
-        f,(raster_ax,hist_ax) = plt.subplots(2,1,sharex='all')
+        f,(hist_ax,raster_ax) = plt.subplots(2,1,sharex='all')
         raster_ax.set_position([0.15,0.15,0.6,0.6])
         hist_ax.set_position([0.15,0.75,0.6,0.25])
         # try sharing the x axis of the raster and the histogram
         # raster_ax.get_shared_x_axes().join(hist_ax, raster_ax)
-        hist_ax.set_xticklabels([])
+        # hist_ax.set_xticklabels([])
         # then add the waveform axes
         wf_ax = plt.axes([0.75,0.75,0.25,0.25])
         # preindex a segs array for the random line collection
