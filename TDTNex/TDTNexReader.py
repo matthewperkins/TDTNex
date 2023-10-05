@@ -30,6 +30,66 @@ from math import floor, sqrt
 # grouby by wire, iterate through the spiketrains for each wire, use timestamp as a key to assign the sort code
 # wire
 
+def get_avg_fps_float(movie):
+    import subprocess
+    get_fps_command = ['ffprobe',
+                       '-v',
+                       'error',
+                       '-select_streams', 
+                       'v:0', 
+                       '-show_entries', 
+                       'stream=avg_frame_rate', 
+                       '-of', 
+                       'default=nokey=1:noprint_wrappers=1']
+    get_fps_command+=[movie]
+    rt = subprocess.run(get_fps_command,capture_output=True)
+    return eval(rt.stdout)
+
+def get_avg_fps_frac(movie):
+    import subprocess
+    get_fps_command = ['ffprobe',
+                       '-v',
+                       'error',
+                       '-select_streams', 
+                       'v:0', 
+                       '-show_entries', 
+                       'stream=avg_frame_rate', 
+                       '-of', 
+                       'default=nokey=1:noprint_wrappers=1']
+    get_fps_command+=[movie]
+    rt = subprocess.run(get_fps_command,capture_output=True)
+    return rt.stdout.decode().rstrip()
+
+def get_r_fps(movie):
+    import subprocess
+    get_fps_command = ['ffprobe',
+                       '-v',
+                       'error',
+                       '-select_streams', 
+                       'v:0', 
+                       '-show_entries', 
+                       'stream=r_frame_rate', 
+                       '-of', 
+                       'default=nokey=1:noprint_wrappers=1']
+    get_fps_command+=[movie]
+    rt = subprocess.run(get_fps_command,capture_output=True)
+    return eval(rt.stdout)
+
+def count_frames(movie):
+    import subprocess
+    count_frames_command = ['ffprobe',
+                       '-v',
+                       'error',
+                       '-select_streams', 
+                       'v:0', 
+                       '-show_entries', 
+                       'stream=nb_frames', 
+                       '-of', 
+                       'default=nokey=1:noprint_wrappers=1']
+    count_frames_command+=[movie]
+    rt = subprocess.run(count_frames_command,capture_output=True)
+    return eval(rt.stdout)
+
 @njit
 def find_artifact_idxs(spiketimes,artifact_times,window = 0.0008):
     # preindex array
