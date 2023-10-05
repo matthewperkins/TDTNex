@@ -1,6 +1,6 @@
 [project]
 name = "TDTNex"
-version = "0.3"
+version = "0.3.1"
 authors = [
   { name="Matthew Perkins", email="matthew.perkins@mssm.edu" },
   ]
