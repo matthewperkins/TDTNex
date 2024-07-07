@@ -19,16 +19,75 @@ from math import floor, sqrt
 
 # maybe make a dataframe, row for each spike, 
 ## column indexs are wire sort code.
-## values are EMGidx, pNueidx, nextime, tdt_time, and a waveform array?
+## values are EMGidx, pNeuidx, nextime, tdt_time, and a waveform array?
 # read the data in wire order frome the tdt, for each time, calculate the nex time
 # grouby by wire, iterate through the spiketrains for each wire, use timestamp as a key to assign the sort code
 # wire 
 # maybe make a dataframe, row for each spike, 
 ## column indexs are wire sort code.
-## values are EMGidx, pNueidx, nextime, tdt_time, and a waveform array?
+## values are EMGidx, pNeuidx, nextime, tdt_time, and a waveform array?
 # read the data in wire order frome the tdt, for each time, calculate the nex time
 # grouby by wire, iterate through the spiketrains for each wire, use timestamp as a key to assign the sort code
 # wire
+
+@njit 
+def trig_signal_avgsem(Signal,fs,peak_indexs,lpad,rpad):
+    # use the bite burst times to make a triggered average
+    dp_lpad = int(fs*lpad)
+    dp_rpad = int(fs*rpad)
+    nsamples = dp_lpad+dp_rpad
+    sig_avg = np.zeros(nsamples)
+
+        
+    # # Create a vector from 0 up to nsamples
+    start_indexs = peak_indexs-dp_lpad
+    
+    # do some bounds checking?
+    runover = True
+    ro_count = len(start_indexs)
+    print(len(Signal))
+    print(start_indexs[-1])
+    while runover:
+        if (start_indexs[ro_count-1]+nsamples)>(len(Signal)-1):
+            print('roll_over')
+            print('current')
+            print(start_indexs[ro_count-1]+nsamples)
+            print('limit')
+            print(len(Signal))
+            ro_count-=1
+        else:
+            print(ro_count)
+            
+            runover=False
+    for i, start_index in enumerate(start_indexs[:ro_count]):
+        sig_avg+=Signal[start_index:start_index+nsamples]
+    sig_avg = sig_avg/len(start_indexs)
+
+    # loop through again to compute the sem
+    print('here now')
+    sig_sem = np.zeros(sig_avg.shape)
+    for i, start_index in enumerate(start_indexs[:ro_count]):
+        sig_sem+=(Signal[start_index:start_index+nsamples]-sig_avg)**2
+    sem_a = np.sqrt(sig_sem/len(start_indexs))
+    avg_xs = np.linspace(-lpad,rpad,len(sig_avg))
+    return avg_xs, sig_avg, sem_a
+
+# implement run length encoding njit, to help deduplicate my toe-aligned threshold crossings
+@njit
+def rle(inarray):
+        """ run length encoding. Partial credit to R rle function. 
+            Multi datatype arrays catered for including non Numpy
+            returns: tuple (runlengths, startpositions, values) """
+        ia = np.asarray(inarray)                # force numpy
+        n = len(ia)
+        if n == 0: 
+            return (None, None, None)
+        else:
+            y = ia[1:] != ia[:-1]               # pairwise unequal (string safe)
+            i = np.append(np.where(y)[0], n - 1)   # must include last element posi
+            z = np.diff(np.append(np.array([-1]), i))      # run lengths
+            p = np.cumsum(np.append(0, z))[:-1] # positions
+            return(z, p, ia[i])
 
 def get_avg_fps_float(movie):
     import subprocess
@@ -77,6 +136,8 @@ def get_r_fps(movie):
 
 def count_frames(movie):
     import subprocess
+    import os
+    assert os.path.exists(movie), "Path %s, does not seem to exist"
     count_frames_command = ['ffprobe',
                        '-v',
                        'error',
@@ -194,7 +255,7 @@ class TDTNex(object):
         return(int(self.tdt.streams.EMGx.fs*ts))
     
     def pNeu(self,start=None,stop=None):
-        pNeu_dur = self.tdt.streams.pNue.data.shape[1]/self.tdt.streams.pNeu.fs
+        pNeu_dur = self.tdt.streams.pNeu.data.shape[1]/self.tdt.streams.pNeu.fs
         if start is not None:
             if (start>0)&(start<=pNeu_dur):
                 S = start
@@ -428,6 +489,7 @@ class TDTNex(object):
 
     def PlotUnitRaster(self,wire,sc,times,lpad,rpad,hist=True,
                        time_offsets = None,
+                       time_preceeds = None,
                        bin_width=0.1,hist_yscale=None, 
                        lwds=1,lineoff=1,linelen=1,
                        inset_yscale=None,raster_color='black',
@@ -456,7 +518,16 @@ class TDTNex(object):
         raster_ax.eventplot(evnts,linewidths = lwds, linelengths = linelen, 
                             lineoffsets = lineoff, color = 'black')
         # now would like to add a patch if there are event offsets
-        if time_offsets is not None:
+        if time_offsets is not None and time_preceeds is not None:
+            assert(len(times)==len(time_offsets)),"Length of Time Offsets %d, is different than that of Times %d" % (len(times),len(time_offsets))
+            assert(len(times)==len(time_preceeds)),"Length of Time Preceeds %d, is different than that of Times %d" % (len(times),len(time_preceeds))
+            from matplotlib.patches import Rectangle
+            # this maybe slow for > 200 events
+            for _i, (pre,_t,off) in enumerate(zip(time_preceeds,times,time_offsets)):
+                _r= Rectangle((pre-_t,(lineoff*_i)-linelen/2),off-pre,lineoff,
+                              color = 'blue',alpha = 0.6, ec = 'None')
+                raster_ax.add_patch(_r)
+        elif time_offsets is not None:
             assert(len(times)==len(time_offsets)),"Length of Time Offsets %d, is different than that of Times %d" % (len(times),len(time_offsets))
             from matplotlib.patches import Rectangle
             # this maybe slow for > 200 events
@@ -464,7 +535,6 @@ class TDTNex(object):
                 _r= Rectangle((0,(lineoff*_i)-linelen/2),off-_t,lineoff,
                               color = 'blue',alpha = 0.6, ec = 'None')
                 raster_ax.add_patch(_r)
-            
                                                                                                                      
         # have to do the inset axes, histogram
         wf_ax.patch.set_alpha(0.02)
@@ -511,13 +581,14 @@ class TDTNex(object):
         for (wire, sc),g  in self.unitdf.groupby(['wire','NEXSC']):
             if sc==0:
                 continue
-            f,(hist_ax,raster_ax,wf_ax), (u_freq, bx) = self.PlotUnitRaster(wire,sc,times,lpad,rpad,
-                                                                            time_offsets=time_offsets,
-                                                                            hist=hist,bin_width=bin_width,
-                                                                            hist_yscale=hist_yscale,
-                                                                            lwds=lwds,lineoff=lineoff,
-                                                                            linelen=linelen,inset_yscale=inset_yscale,
-                                                                            raster_color=raster_color)
+            f,(hist_ax,raster_ax,wf_ax), (u_freq, bx) = self.PlotUnitRaster(
+                wire,sc,times,lpad,rpad,
+                time_offsets=time_offsets,
+                hist=hist,bin_width=bin_width,
+                hist_yscale=hist_yscale,
+                lwds=lwds,lineoff=lineoff,
+                linelen=linelen,inset_yscale=inset_yscale,
+                raster_color=raster_color)
             if f is None:
                 continue
             if fndec is None:
@@ -1107,6 +1178,58 @@ class TDTNex(object):
         tagDf['LsrSig'] = tagDf['P']<0.05
         return tagDf
 
+    def DeMultiPlex(self, plexed_names = ['Valv','Spkr','CamS']):
+        if 'MPlx' not in self.tdt.epocs.keys():
+            print("No MPlx Store, Not doing anything")
+            return
+        MPlex = self.tdt.epocs.MPlx
+        dint = (MPlex.data).astype(np.uint8)
+        rlens, rstrt, values = rle(dint)
+        print("longest run is %d" % np.max(rlens))
+        r_idxs = np.where(rlens>1)
+        rdelta = (np.diff(np.c_[MPlex.onset[rstrt[r_idxs]],MPlex.onset[rstrt[r_idxs]+1]])*1000).flatten()
+        if np.size(rdelta)!=0:
+            assert(np.max(rdelta)//(1000/24414.1)<2),"There are runs of same data that have more than one clock tick"
+            # now filter by the run starts, to drop duplicate events entering the same data
+        MPlex.onset, MPlex.offset, MPlex.data = MPlex.onset[rstrt], MPlex.offset[rstrt], MPlex.data[rstrt]
+        dint = (MPlex.data).astype(np.uint8)
+        # unpack, reshape, and flip the column order, 
+        # so now will be row for each event,  first store, the second store etc.
+        unpacked = np.unpackbits(dint).reshape((-1,len(np.unpackbits(dint))//len(dint)))[:,::-1]
+        [p for p in zip(MPlex.onset,unpacked)]
+        # now I can slice through the columns to construct onset/offset type stores
+        # again use rle here
+        for ii, name in enumerate(plexed_names):
+            if np.sum(unpacked[:,ii])==0:
+                print("No %s event?" % (name))
+                continue
+            _,_idxs,_ = rle(unpacked[:,ii])
+            onset_mask = np.where(unpacked[_idxs,ii]==1)
+            offset_mask = np.where(unpacked[_idxs,ii]==0)
+            if np.size(onset_mask)==0:
+                # shit
+                print("there is no start for %s, just set to zero" % name)
+                onsets = np.r_[0]
+            else:
+                onsets = MPlex.onset[_idxs[onset_mask]]
+                offsets = MPlex.offset[_idxs[offset_mask]]
+                # only keep offsets after the first onset
+            offsets = offsets[offsets>onsets[0]]
+            # then check to see if last offset exists
+            print(len(onsets),len(offsets))
+            data = np.ones(len(offsets),dtype=np.uint8)
+            self.tdt.epocs[name] = tdt.StructType({'name':name,
+                                           'onset':onsets,
+                                           'offset':offsets,
+                                           'type':MPlex['type'],
+                                           'type_str':MPlex['type_str'],
+                                           'data':data,
+                                           'dform':MPlex['dform'],
+                                           'size':MPlex['size']})
+        # once I have de-multiplexed, pop this off the epocs keys
+        # so its gone!
+        self.tdt.epocs.__dict__.pop('MPlx')
+
 @njit
 def trig_rate(ev_times, spike_times,lshift,rshift):
     rates = np.zeros(len(ev_times),dtype = np.float_)
@@ -1239,3 +1362,30 @@ def find_opto_artifact_idxs(spiketimes,lasertimes,window = 0.0008):
         spikes_to_drop[counter:counter+len(artifact_spikes)]=artifact_spikes
         counter+=len(artifact_spikes)
     return np.sort(spikes_to_drop[0:counter])
+
+def BalloonProgram(tdt_d,start_idx,rate,fs,Op='PAOp',Dr='PADr', measures = False,
+                   shoulder_pad=5, shoulder_dur=30):
+    """rate in uL / sec"""
+    inflt_start = tdt_d.epocs[Op].onset[start_idx]
+    inflt_end = tdt_d.epocs[Op].offset[start_idx]
+    deflt_start = tdt_d.epocs[Op].onset[start_idx+1]
+    deflt_end = tdt_d.epocs[Op].offset[start_idx+1]
+    inflt_dur = inflt_end-inflt_start
+    inflt_vol = inflt_dur*rate
+    deflt_dur = deflt_end-deflt_start
+    vol = np.r_[np.linspace(0,inflt_vol,int(inflt_dur*fs)),
+                np.repeat(inflt_vol,int((deflt_start-inflt_end)*fs)),
+                np.linspace(inflt_vol,0,int(deflt_dur*fs))]
+    xs = np.linspace(inflt_start,deflt_end,len(vol))
+    # want to return corner times? for measurement extraction
+    if measures:
+        prs_xs = np.linspace(0,tdt_d.info.duration.total_seconds(),len(tdt_d.streams.Vprs.data))
+        pre_m = (prs_xs>inflt_start-shoulder_pad-shoulder_dur)&(prs_xs<inflt_start-shoulder_pad)
+        inflt_m = (prs_xs>inflt_end)&(prs_xs<deflt_start)
+        post_m = (prs_xs>deflt_end+shoulder_pad)&(prs_xs<deflt_end+shoulder_pad+shoulder_dur)
+        msrs = []
+        for _m in [pre_m,inflt_m,post_m]:
+            msrs.append(tdt_d.streams.Vprs.data[_m].mean())
+        return (xs,vol,msrs)
+    else:    
+        return (xs,vol)
