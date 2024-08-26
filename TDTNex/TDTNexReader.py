@@ -43,30 +43,19 @@ def trig_signal_avgsem(Signal,fs,peak_indexs,lpad,rpad):
     start_indexs = peak_indexs-dp_lpad
     
     # do some bounds checking?
-    runover = True
-    ro_count = len(start_indexs)
-    print(len(Signal))
-    print(start_indexs[-1])
-    while runover:
-        if (start_indexs[ro_count-1]+nsamples)>(len(Signal)-1):
-            print('roll_over')
-            print('current')
-            print(start_indexs[ro_count-1]+nsamples)
-            print('limit')
-            print(len(Signal))
-            ro_count-=1
-        else:
-            print(ro_count)
-            
-            runover=False
-    for i, start_index in enumerate(start_indexs[:ro_count]):
+    # should do this with NP search sorted instead.
+    # do I have to mask the indexs at all?
+    _m =(peak_indexs+dp_rpad)<len(Signal)
+    _m&=(peak_indexs-dp_lpad)>=0
+
+    for i, start_index in enumerate(start_indexs[_m]):
         sig_avg+=Signal[start_index:start_index+nsamples]
     sig_avg = sig_avg/len(start_indexs)
 
     # loop through again to compute the sem
     print('here now')
     sig_sem = np.zeros(sig_avg.shape)
-    for i, start_index in enumerate(start_indexs[:ro_count]):
+    for i, start_index in enumerate(start_indexs[_m]):
         sig_sem+=(Signal[start_index:start_index+nsamples]-sig_avg)**2
     sem_a = np.sqrt(sig_sem/len(start_indexs))
     avg_xs = np.linspace(-lpad,rpad,len(sig_avg))
@@ -151,10 +140,48 @@ def count_frames(movie):
     rt = subprocess.run(count_frames_command,capture_output=True)
     return eval(rt.stdout)
 
+def get_movie_dur(movie):
+    import subprocess
+    get_dur_command = ['ffprobe',
+                       '-v',
+                       'error',
+                       '-show_entries',
+                       'format=duration',
+                       '-of',
+                       'default=noprint_wrappers=1:nokey=1']
+    get_dur_command+=[movie]
+    rt=subprocess.run(get_dur_command,capture_output=True)
+    return float(rt.stdout.decode().rstrip())
+
+# lets dig out the seconds from the time stamps
+def time_stamp_to_sec(ts):
+    import re
+    retimestamp = re.compile(r'.*(?P<ts_hour>[0-9]{2})[-_:](?P<ts_minute>[0-9]{2})[-_:](?P<ts_second>[0-9]{2})\.(?P<ts_millisec>[0-9]{3})')
+    groupdict = retimestamp.search(ts)
+    ts_h = float(groupdict['ts_hour'])
+    ts_m = float(groupdict['ts_minute'])
+    ts_s = float(groupdict['ts_second'])
+    ts_ms = float(groupdict['ts_millisec'])
+    # for some reason, ffmpeg has stopped recognizing the actual fps for the gstreamer grabbed streams, 
+    # but I seem to get the correct fps with backend = cv2.CAP_GSTREAMER
+    time_in_sec = ts_h*60*60+ts_m*60+ts_s+ts_ms/1000
+    return time_in_sec
+
+# for going back to the movie
+def sec_to_time_stamp(sec,tdt_d,frame_epoc_name='FrmN'):
+    from math import modf
+    if frame_epoc_name is not None:
+        sec-=tdt_d.epocs[frame_epoc_name].onset[0]
+    hr,h = modf(sec/3600)
+    mr,m = modf(hr*60)
+    sr,s = modf(mr*60)
+    ms = int(sr*1000)
+    return ("%02d:%02d:%02d.%03d" % (h,m,s,ms))
+
 @njit
 def find_artifact_idxs(spiketimes,artifact_times,window = 0.0008):
     # preindex array
-    spikes_to_drop = np.repeat(np.array([-1],dtype=np.int_),10000)
+    spikes_to_drop = np.repeat(np.array([-1],dtype=np.int64),10000)
     counter = 0
     for artifact_time in artifact_times:
         artifact_spikes = np.where(np.abs(spiketimes - artifact_time)<window)[0]
@@ -171,8 +198,8 @@ def count_snips(event_times,unit_times,lpad,rpad):
 
 @njit 
 def make_r_bins(bin_width,lpad,rpad):
-    left_side_bins = np.arange(0,-lpad,-bin_width,dtype = np.float_)[::-1]
-    right_side_bins = np.arange(bin_width,rpad,bin_width, dtype = np.float_)
+    left_side_bins = np.arange(0,-lpad,-bin_width,dtype = np.float64)[::-1]
+    right_side_bins = np.arange(bin_width,rpad,bin_width, dtype = np.float64)
     bins = np.zeros(len(left_side_bins)+len(right_side_bins))
     bins[0:len(left_side_bins)]=left_side_bins
     bins[len(left_side_bins):]=right_side_bins
@@ -1179,68 +1206,75 @@ class TDTNex(object):
         return tagDf
 
     def DeMultiPlex(self, plexed_names = ['Valv','Spkr','CamS']):
-        if 'MPlx' not in self.tdt.epocs.keys():
-            print("No MPlx Store, Not doing anything")
-            return
-        MPlex = self.tdt.epocs.MPlx
-        dint = (MPlex.data).astype(np.uint8)
-        rlens, rstrt, values = rle(dint)
-        print("longest run is %d" % np.max(rlens))
-        r_idxs = np.where(rlens>1)
-        rdelta = (np.diff(np.c_[MPlex.onset[rstrt[r_idxs]],MPlex.onset[rstrt[r_idxs]+1]])*1000).flatten()
-        if np.size(rdelta)!=0:
-            assert(np.max(rdelta)//(1000/24414.1)<2),"There are runs of same data that have more than one clock tick"
-            # now filter by the run starts, to drop duplicate events entering the same data
-        MPlex.onset, MPlex.offset, MPlex.data = MPlex.onset[rstrt], MPlex.offset[rstrt], MPlex.data[rstrt]
-        dint = (MPlex.data).astype(np.uint8)
-        # unpack, reshape, and flip the column order, 
-        # so now will be row for each event,  first store, the second store etc.
-        unpacked = np.unpackbits(dint).reshape((-1,len(np.unpackbits(dint))//len(dint)))[:,::-1]
-        [p for p in zip(MPlex.onset,unpacked)]
-        # now I can slice through the columns to construct onset/offset type stores
-        # again use rle here
-        for ii, name in enumerate(plexed_names):
-            if np.sum(unpacked[:,ii])==0:
-                print("No %s event?" % (name))
-                continue
-            _,_idxs,_ = rle(unpacked[:,ii])
-            onset_mask = np.where(unpacked[_idxs,ii]==1)
-            offset_mask = np.where(unpacked[_idxs,ii]==0)
-            if np.size(onset_mask)==0:
-                # shit
-                print("there is no start for %s, just set to zero" % name)
-                onsets = np.r_[0]
-            else:
-                onsets = MPlex.onset[_idxs[onset_mask]]
-                offsets = MPlex.offset[_idxs[offset_mask]]
-                # only keep offsets after the first onset
-            offsets = offsets[offsets>onsets[0]]
-            # then check to see if last offset exists
-            print(len(onsets),len(offsets))
-            data = np.ones(len(offsets),dtype=np.uint8)
-            self.tdt.epocs[name] = tdt.StructType({'name':name,
-                                           'onset':onsets,
-                                           'offset':offsets,
-                                           'type':MPlex['type'],
-                                           'type_str':MPlex['type_str'],
-                                           'data':data,
-                                           'dform':MPlex['dform'],
-                                           'size':MPlex['size']})
-        # once I have de-multiplexed, pop this off the epocs keys
-        # so its gone!
-        self.tdt.epocs.__dict__.pop('MPlx')
+        # just a pass through
+        DeMultiPlex(self.tdt, plexed_names=plexed_names)
+
+# should really be able to de MultiPlex a free standing TDT block
+def DeMultiPlex(TDT_d, plexed_names = ['Valv','Spkr','CamS']):
+    if 'MPlx' not in TDT_d.epocs.keys():
+        print("No MPlx Store, Not doing anything")
+        return
+    MPlex = TDT_d.epocs.MPlx
+    dint = (MPlex.data).astype(np.uint8)
+    rlens, rstrt, values = rle(dint)
+    print("longest run is %d" % np.max(rlens))
+    r_idxs = np.where(rlens>1)
+    rdelta = (np.diff(np.c_[MPlex.onset[rstrt[r_idxs]],MPlex.onset[rstrt[r_idxs]+1]])*1000).flatten()
+    if np.size(rdelta)!=0:
+        assert(np.max(rdelta)//(1000/24414.1)<2),"There are runs of same data that have more than one clock tick"
+        # now filter by the run starts, to drop duplicate events entering the same data
+    MPlex.onset, MPlex.offset, MPlex.data = MPlex.onset[rstrt], MPlex.offset[rstrt], MPlex.data[rstrt]
+    dint = (MPlex.data).astype(np.uint8)
+    # unpack, reshape, and flip the column order, 
+    # so now will be row for each event,  first store, the second store etc.
+    unpacked = np.unpackbits(dint).reshape((-1,len(np.unpackbits(dint))//len(dint)))[:,::-1]
+    [p for p in zip(MPlex.onset,unpacked)]
+    # now I can slice through the columns to construct onset/offset type stores
+    # again use rle here
+    for ii, name in enumerate(plexed_names):
+        if np.sum(unpacked[:,ii])==0:
+            print("No %s event?" % (name))
+            continue
+        _,_idxs,_ = rle(unpacked[:,ii])
+        onset_mask = np.where(unpacked[_idxs,ii]==1)
+        offset_mask = np.where(unpacked[_idxs,ii]==0)
+        if np.size(onset_mask)==0:
+            # shit
+            print("there is no start for %s, just set to zero" % name)
+            onsets = np.r_[0]
+        else:
+            onsets = MPlex.onset[_idxs[onset_mask]]
+            offsets = MPlex.offset[_idxs[offset_mask]]
+            # only keep offsets after the first onset
+        offsets = offsets[offsets>onsets[0]]
+        # then check to see if last offset exists
+        print(len(onsets),len(offsets))
+        data = np.ones(len(offsets),dtype=np.uint8)
+        TDT_d.epocs[name] = tdt.StructType({'name':name,
+                                       'onset':onsets,
+                                       'offset':offsets,
+                                       'type':MPlex['type'],
+                                       'type_str':MPlex['type_str'],
+                                       'data':data,
+                                       'dform':MPlex['dform'],
+                                       'size':MPlex['size']})
+    # once I have de-multiplexed, pop this off the epocs keys
+    # so its gone!
+    TDT_d.epocs.__dict__.pop('MPlx')
+
 
 @njit
 def trig_rate(ev_times, spike_times,lshift,rshift):
-    rates = np.zeros(len(ev_times),dtype = np.float_)
+    rates = np.zeros(len(ev_times),dtype = np.float64)
     for ii in range(len(ev_times)):
         rates[ii]=np.sum((spike_times>=(ev_times[ii]-lshift))&(spike_times<(ev_times[ii]+rshift)))/(lshift+rshift)
     return np.nanmean(rates), np.nanstd(rates), rates
+
 @njit
 def trig_vec(ev_times, spike_times,lshift,rshift,bin_width):
     bins = np.arange(0,lshift+rshift+bin_width*0.01,bin_width)
     xs = bins[0:-1]
-    rate_vecs = np.zeros((len(ev_times),)+xs.shape,dtype = np.float_)
+    rate_vecs = np.zeros((len(ev_times),)+xs.shape,dtype = np.float64)
     for ii in range(len(ev_times)):
         _spikes = spike_times[(spike_times>=(ev_times[ii]-lshift))&(spike_times<(ev_times[ii]+rshift))]-ev_times[ii]+lshift
         counts,_ =np.histogram(_spikes,bins)
@@ -1260,7 +1294,7 @@ def descritized_spike_raster(event_times,dst,dt,Wn):
     dst, discretized spike raster, with each bin dt in length
     dt, time step in seconds
     Wn, window width, number of time steps'''
-    event_didxs = (event_times/dt).astype(np.int_)
+    event_didxs = (event_times/dt).astype(np.int64)
     dsr = np.zeros((len(event_times),Wn),dtype=np.bool_)
     ii=0
     for didx in event_didxs:
@@ -1314,10 +1348,10 @@ def SALTY(spt_baseline, spt_test,dt=0.001,wn=0.005):
     nmbn = round(wn/dt)
     edges = np.arange(-1,nmbn+1)
     nm = floor(st/nmbn)
-    lsi = np.zeros((tno,nm),dtype = np.int_)
+    lsi = np.zeros((tno,nm),dtype = np.int64)
     slsi = np.copy(lsi)
-    hlsi = np.zeros((nmbn+1,nm+1), dtype = np.int_)
-    nhlsi = np.zeros(hlsi.shape, dtype = np.float_) # needs to hold normalized vector
+    hlsi = np.zeros((nmbn+1,nm+1), dtype = np.int64)
+    nhlsi = np.zeros(hlsi.shape, dtype = np.float64) # needs to hold normalized vector
     counter = 0
     for t in np.arange(0,st,nmbn): # loop through the baseline windows
         for k in np.arange(0,tno):
@@ -1355,7 +1389,7 @@ def SALTY(spt_baseline, spt_test,dt=0.001,wn=0.005):
 @njit
 def find_opto_artifact_idxs(spiketimes,lasertimes,window = 0.0008):
     # preindex array
-    spikes_to_drop = np.repeat(np.array([-1],dtype=np.int_),10000)
+    spikes_to_drop = np.repeat(np.array([-1],dtype=np.int64),10000)
     counter = 0
     for lasertime in lasertimes:
         artifact_spikes = np.where(np.abs(spiketimes - lasertime)<window)[0]
@@ -1389,3 +1423,92 @@ def BalloonProgram(tdt_d,start_idx,rate,fs,Op='PAOp',Dr='PADr', measures = False
         return (xs,vol,msrs)
     else:    
         return (xs,vol)
+
+# pull laser stimulation blocks out from the headers
+# without having to read the whole block
+def get_lsr_stim_blocks(header,laser_name = 'LsrP',maxISI=2,minNPulse=5):
+    import pandas as pd
+    from datetime import timedelta, datetime
+    # get the duration of the file in seconds from the header
+    dur = (datetime.fromtimestamp(header.stop_time[0])-\
+           datetime.fromtimestamp(header.start_time[0])).total_seconds()
+    if laser_name not in header.stores.keys():
+        return None
+    # have to contstruct the stimulus epocs
+    lsr_burst_start_idxs = np.where((np.diff(\
+            np.r_[-maxISI*1.1,header.stores.LsrP.onset][::-1])[::-1])<-maxISI)[0]
+    lsr_burst_end_idxs = np.where(np.diff(\
+        np.r_[header.stores.LsrP.onset,dur+maxISI*1.1])>maxISI)[0]
+    # I have some singletons in here, and some general garbage
+    LsrStimIdxs = np.c_[lsr_burst_start_idxs,lsr_burst_end_idxs]
+    # drop all the stimulus burst with fewer than 5 stimulus
+    drop_idxs = np.where(np.diff(LsrStimIdxs).flatten()<minNPulse)[0]
+    mask = np.ones(len(LsrStimIdxs), np.bool_)
+    mask[drop_idxs] = 0
+    LsrStimIdxs = LsrStimIdxs[mask]
+    LsrStimuli = header.stores.LsrP.onset[LsrStimIdxs]
+    LsrStimFreqs = np.diff(LsrStimIdxs).flatten()/np.diff(LsrStimuli).flatten()
+    stim_durs = np.diff(LsrStimuli)
+    # now make a data frame
+    return pd.DataFrame({'BurstStartTime':LsrStimuli[:,0],
+                  'BurstEndTime':LsrStimuli[:,1],
+                  'BurstFreq':LsrStimFreqs})
+    
+def tdt_ts_to_mov_ts(tdt_header,movie,sec):
+    import warnings
+    from TDTNex import get_avg_fps_float
+    from scipy.stats import mode
+    # make the seconds an array:
+    if type(sec)!=type(np.array([])): 
+        sec = np.array(sec)
+    # flatten and sort the times
+    sec = np.sort(sec.flatten())
+    # figure the frame times:
+    if ('FrmN' in tdt_header.stores.keys()) and\
+       ('CamF' in tdt_header.stores.keys()):
+        FN='CamF'
+        warnings.warn("equivocal frame time epoc names, using %s" % FN)
+    elif 'FrmN' in tdt_header.stores.keys():
+        FN='FrmN'
+    elif 'CamF' in tdt_header.stores.keys():
+        FN='CamF'
+    else:
+        warnings.warn("no timing epoc name that I guess")
+    # drop a time zero frame if it exists:
+    if tdt_header.stores[FN].onset[0]==0:
+        # drop the first frame onset
+        tdt_header.stores[FN].onset=tdt_header.stores[FN].onset[1:]
+        tdt_header.stores[FN].offset=tdt_header.stores[FN].offset[1:]
+        tdt_header.stores[FN].data=tdt_header.stores[FN].data[1:]
+    # check that there are no gaps in the frame sequence:
+    td = np.diff(tdt_header.stores[FN].onset)
+    assert(np.max(td)<(mode(td).mode*1.3)),\
+    "max frame interval %.6f\
+    is more than 1.3 times mode interval\
+    %.6f" % (np.max(td),mode(td).mode)
+    # if this is all good to here lets make the frame times 
+    # a variable
+    frame_xs = tdt_header.stores[FN].onset
+    # finally compute the ts
+    avg_fps = get_avg_fps_float(movie)
+    frame_idxs = np.searchsorted(frame_xs,sec)
+    # what to do if sec is before or after last time?
+    if 0 in frame_idxs:
+        warnings.warn("frame idx 0, maybe you have picked\n\
+        a time before the first frame in the movie, %.6f" %\
+                      (frame_xs[0]))
+    if len(frame_xs) in frame_idxs:
+        warnings.warn("last frame picked, maybe you have picked\n\
+        a time after the first frame in the movie, %.6f" %\
+                      (frame_xs[-1]))
+    movie_times = frame_idxs/avg_fps
+    # just do this as a list:
+    movie_ts = []
+    for _t in movie_times:
+        # now to formate the movie seconds as a time stamp
+        H=_t//3600
+        M=(_t%3600)//60
+        S=((_t%3600)%60)//1
+        ms=(((_t%3600)%60)%1)*1000//1
+        movie_ts.append("%02d:%02d:%02d.%03d" % (H,M,S,ms))
+    return movie_ts
