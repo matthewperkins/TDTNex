@@ -1453,6 +1453,41 @@ def get_lsr_stim_blocks(header,laser_name = 'LsrP',maxISI=2,minNPulse=5):
     return pd.DataFrame({'BurstStartTime':LsrStimuli[:,0],
                   'BurstEndTime':LsrStimuli[:,1],
                   'BurstFreq':LsrStimFreqs})
+
+# keep this here to simplify other stuff.
+def make_bursts(sig,xs,prom=8.5,startISI=0.8,endISI=1,minN=3):
+    from scipy.signal import find_peaks
+    # find antipeaks
+    apks,_ = find_peaks(sig*-1,prominence=prom)
+    # find antipeaks
+    pks,_ = find_peaks(sig,prominence=prom)
+    all_peaks = np.sort(np.r_[xs[pks],xs[apks]])
+    # lets just do the burst definitionally manually.
+    # make a min ISI, to start a burst, make a max ISI, to end a burst,
+    # make a min event number to keep burst
+    burst_start_idxs = np.where((np.diff(np.r_[-startISI*1.1,all_peaks][::-1])[::-1])<-startISI)[0]
+    burst_end_idxs = np.where(np.diff(np.r_[all_peaks,all_peaks[-1]+endISI*1.1])>endISI)[0]
+    burst_start_idxs_u = np.setdiff1d(burst_start_idxs,burst_end_idxs)
+    burst_end_idxs_u = np.setdiff1d(burst_end_idxs,burst_start_idxs)
+    # only keep burst starts that are smaller than the largest burst end
+    burst_start_idxs_u = burst_start_idxs_u[burst_start_idxs_u<burst_end_idxs_u[-1]]
+    insert_starts = np.searchsorted(burst_end_idxs_u,burst_start_idxs_u)
+    if np.any(np.diff(insert_starts)==0):
+        # if there are ambiguous starts to the same end, use the earlier start
+        fix_starts = burst_start_idxs_u[np.r_[np.diff(insert_starts).astype(np.bool_),True]]
+    else:
+        fix_starts = burst_start_idxs_u
+    # now check the burst ends
+    insert_ends = np.searchsorted(fix_starts,burst_end_idxs_u)
+    if np.any(np.diff(insert_ends)==0):
+        fix_ends = burst_end_idxs_u[np.r_[np.diff(insert_ends).astype(np.bool_),True]]
+    else:
+        fix_ends = burst_end_idxs_u
+    bursts = all_peaks[np.c_[fix_starts,fix_ends]]
+    burst_lens = np.diff(np.c_[fix_starts,fix_ends])
+    # drop burst with fewer than 3 events
+    bursts = bursts[(burst_lens>3).flatten()]
+    return bursts
     
 def tdt_ts_to_mov_ts(tdt_header,movie,sec):
     import warnings
@@ -1512,3 +1547,254 @@ def tdt_ts_to_mov_ts(tdt_header,movie,sec):
         ms=(((_t%3600)%60)%1)*1000//1
         movie_ts.append("%02d:%02d:%02d.%03d" % (H,M,S,ms))
     return movie_ts
+
+# helpers for animated movie generation
+class VidDataStream(object):
+    def __init__(self,Data,Fs,RngLw,RngHi):
+        self.Data = Data
+        print(len(self.Data))
+        self.Fs = Fs
+        self.RngLw = RngLw
+        self.RngHi = RngHi
+        self.Rng = self.RngHi - self.RngLw
+
+    def ds_for_vid(self,frame_width,time_span):
+        sec_per_pixel = time_span/frame_width
+        emg_pts_per_pixel = int(self.Fs*sec_per_pixel)
+        y = self.Data[0:(len(self.Data)//emg_pts_per_pixel)*emg_pts_per_pixel]
+        t_end_px = len(y)/self.Fs
+        print(t_end_px)
+        ds_min = np.min(y.reshape((-1,emg_pts_per_pixel)),axis=1)
+        ds_max = np.max(y.reshape((-1,emg_pts_per_pixel)),axis=1)
+        # this is a little fun with the ravel, means I have essentially halved the time span?
+        stream_clip=np.clip(np.ravel(np.c_[ds_min,ds_max]),
+                            self.RngLw,
+                            self.RngHi)
+        x = np.linspace(0,t_end_px,len(stream_clip))
+        self.VdsFs = len(stream_clip)/t_end_px
+        # clip 
+        # offset 
+        stream_clip-=self.RngLw
+        # range scale
+        stream_clip/=self.Rng # now should be zero to 1
+        # invert
+        stream_clip*=-1 # invert so Y can be subtracted, opencv coords are Y mirrored
+        # the rest I will have to do in the video, 
+        # need to know the mapping to video coords
+        # device scale
+        ## stream_clip*=(data_height/2)
+        # device offset
+        ## stream_clip+=(out_frame_height+((ii-1)*data_height/2))
+        # stream_clip.astype(np.int32)
+        # WILL HAVE TO ADD INTERPOLATION HERE TOO,
+        # FOR STREAMS WITH FEWER DP / SEC THAN PX / SEC.
+        return x,stream_clip,self.VdsFs
+        
+# find movie# Now lets make a movie:
+def MakeHLDataClip(tdt_d,movie,movie_start_time,movie_end_time,
+                   VidDataStreams, time_span = 7.5,
+                   pl_thickness = 1,
+                   output_name = "ForceMovie", unit = None, rec = None,
+                   video_range = 0.3, out_frame_rate=None, bitrate=1000):
+    '''
+    Make a movie from a synchronously recorded stream with tdt, and basler camera
+    time_span is in seconds and sets the data presentation by downsampling, 
+    greater time span is more downsampling.
+    '''
+    from scipy.signal import decimate
+    from scipy.stats import mode
+    import cv2
+    cap = cv2.VideoCapture(movie)
+    # get their frame widths and heights for output cap
+    frame_width = int(cap.get(3))
+    frame_height = int(cap.get(4))
+    # now, add below the frame, by the 'video_range'
+    data_height = int(((frame_height*video_range)//2)*2)
+    print(data_height)
+    out_frame_height = frame_height+data_height
+    print(out_frame_height)
+    
+    # get the frame rate
+    FrameOnsets = tdt_d.epocs.FrmN.onset
+    frame_rate = 1/mode(np.diff(FrameOnsets)).mode
+    print(frame_rate)
+    # find the frame indexes corresponding to the movie start and stop times
+    frame_idx_start = np.argmin(np.abs(tdt_d.epocs.FrmN.onset-movie_start_time))
+    frame_idx_end = np.argmin(np.abs(tdt_d.epocs.FrmN.onset-movie_end_time))
+    MST_FA = tdt_d.epocs.FrmN.onset[frame_idx_start] # Movie Start Time Frame Accurate
+    MET_FA = tdt_d.epocs.FrmN.onset[frame_idx_end] # Movie End Time Frame Accurate
+
+    # make sure the closest frame is close enough
+    assert(np.abs(movie_start_time-MST_FA)<0.05),"movie start time %g is too far away from closest frame %g" % (movie_start_time,FrameOnsets[frame_idx_start])
+    assert(np.abs(movie_end_time-MET_FA)<0.05),"movie end time %g is too far away from closest frame %g" % (movie_end_time,FrameOnsets[frame_idx_end])
+    # seek to the starting frame:
+    print("FPS:",cap.get(cv2.CAP_PROP_FPS))
+    assert cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx_start)
+    # file name stuff
+    import os
+    dir_name = os.path.dirname(output_name)
+    f_name = os.path.basename(output_name).split(os.extsep)[0]+'.mp4'
+    output_path = os.path.join(dir_name,f_name)
+    assert(not os.path.exists(output_path)),'Path %s already exits, I dont want to overwrite' % output_name
+
+    # set up the output for the capture with gstreamer, to control the bitrate directly, this is nice!
+    # set up the out cap to sink into gst.
+    # old pipeline
+    # appsink2mp4 = "appsrc ! \
+    # videoconvert ! nvh265enc bitrate=%d ! \
+    # h265parse ! mp4mux ! \
+    # filesink location=%s" % (bitrate, output_path)
+    # new pipeline, specify pixel format to be powerpoint compatible.
+    appsink2mp4 = "appsrc ! \
+                   videoconvert ! video/x-raw, format=I420 ! nvh264enc bitrate=%d ! \
+                   h264parse ! mp4mux ! \
+                   filesink location=%s" % (bitrate, output_path)
+    if out_frame_rate is None:
+        out_frame_rate = frame_rate
+        vid_dur = (MET_FA - MST_FA)
+    else:
+        vid_dur = (MET_FA - MST_FA)*(frame_rate/out_frame_rate)
+    print(appsink2mp4)
+    out = cv2.VideoWriter(appsink2mp4, cv2.CAP_GSTREAMER, 0, out_frame_rate, 
+                          (frame_width,out_frame_height),True)
+    #print('here')
+    stream_dp = frame_width
+    stream_offset = stream_dp//2
+    VidDatas = []
+    # have to work out the scaling and offsets for the two streams
+    for ii,VDS in enumerate(VidDataStreams):
+        x,y,adj_fs = VDS.ds_for_vid(frame_width,time_span)
+        # device scale
+        y*=(data_height/len(VidDataStreams))
+        # device offset
+        y+=(out_frame_height+((ii-len(VidDataStreams)+1)*(data_height/len(VidDataStreams))))
+        VidDatas.append(y.astype(np.int32))
+    Cols = np.arange(frame_width)
+    VidData_a = np.array(VidDatas)
+    print(VidData_a.shape)
+    lx1,ly1 = frame_width//2, 0
+    lx2,ly2 = frame_width//2, data_height
+    text_org = frame_width-100,100
+    blank_out_frame = np.zeros((out_frame_height,frame_width,3),dtype='uint8')
+    print("blank_out_frame shape %s, frame width %d, frame height %d" % (blank_out_frame.shape.__repr__(), 
+                                                                         frame_width,
+                                                                         frame_height))
+    line_thickness = 1
+    # what to do about laser?
+    # lets do this for the laser:
+    if 'LsrP' in tdt_d.epocs.keys():
+        # lets make laser stimulation bursts:
+        hdr = tdt.read_block(
+            os.path.join(
+                tdt_d.info.tankpath,tdt_d.info.blockname),
+            headers=1)
+        LsrDf = get_lsr_stim_blocks(hdr)
+        if len(LsrDf)>0:
+            LsrDf['BurstFreqInt'] = np.round(LsrDf['BurstFreq']).astype(np.int32)
+            # okay have stimulation bursts, lets make an epoc
+            from tdt import StructType
+            NewEpoc = {}
+            for k in tdt_d.epocs.LsrP.keys():
+                if k in ['onset','offset','data']:
+                    NewEpoc[k]=np.array([])
+                else:
+                    NewEpoc[k]=tdt_d.epocs.LsrP[k]
+            NewEpoc = StructType(NewEpoc)
+            NewEpoc.name = 'Stt1'
+            NewEpoc.onset = LsrDf.BurstStartTime.values
+            NewEpoc.offset = LsrDf.BurstEndTime.values
+            NewEpoc.data = np.round(LsrDf.BurstFreq.values).astype(np.int32)
+            tdt_d.epocs['LsFq'] = NewEpoc
+            # cute way to do this:
+            # subtract the FrmN from these bracket Indexs.
+            # take only the sign of the different
+            # compute the diff of the brackets across axis=1
+            # 
+            LsFqFrameIdxs = np.searchsorted(tdt_d.epocs.FrmN.onset,
+                                            np.c_[tdt_d.epocs.LsFq.onset,
+                                                  tdt_d.epocs.LsFq.offset])
+            match_row = lambda FN: np.argwhere(
+                (np.diff(np.sign(LsFqFrameIdxs-FN),axis=1)
+                    .flatten()>1)).flatten()
+        else:
+            match_row = lambda FN: np.array([])
+    else:
+        match_row = lambda FN: np.array([])
+    
+    while cap.isOpened():
+        grabbed, frame = cap.read()
+        if grabbed:
+            # CAP_PROP_POS_FRAMES is the index position of the NEXT frame,
+            # so the current frame index is one less
+            framen = int(cap.get(cv2.CAP_PROP_POS_FRAMES))-1
+            t = tdt_d.epocs.FrmN.onset[framen]
+            if (framen==frame_idx_end):
+                break
+            # zero out old frame
+            blank_out_frame[0:frame_height,:,:]=frame
+            blank_out_frame[frame_height:,:,:]=0
+            # index in to the decimated data
+            VidDataidx = int(FrameOnsets[framen]*adj_fs)-stream_offset
+            for i in range(len(VidDataStreams)):
+                points = np.column_stack((Cols,VidData_a[i,VidDataidx:VidDataidx+stream_dp])).astype(np.int32)
+                points = points.reshape((-1,1,2))
+                cv2.polylines(blank_out_frame,[points],False,(0,255,255),pl_thickness,
+                              cv2.LINE_AA)
+            # draw a verticle line:
+            cv2.line(blank_out_frame[frame_height:,:,:], (lx1, ly1), (lx2, ly2), (150, 150, 0), thickness=line_thickness)
+            # see if we have laser stimulaiton happening here:
+            row_match = match_row(framen)
+            if np.size(row_match)==1:
+                freq = "%d Hz" % LsrDf.loc[row_match,'BurstFreqInt'].iloc[0]
+                cv2.putText(blank_out_frame, freq, (50,150), cv2.FONT_HERSHEY_SIMPLEX, 1, (255,0,0), 4, cv2.LINE_AA)
+            out.write(blank_out_frame)
+        else:
+            break
+    cap.release()
+    out.release()    
+    
+    if unit is not None:
+        assert(rec is not None),"if listening to units, assume merged sorts from OFS"
+        # now I want to add the spiking unit data as audio next to this.
+        # if the outputrate for the video is manually set, this could pose a problem.
+        Adur = float(MET_FA-MST_FA)
+        SU_fs = tdt_d.snips.eNeu.fs
+        SU_audio_wv = np.zeros(int(Adur*tdt_d.snips.eNeu.fs))
+
+        nsamples = 30 # this is fixed at the TDT digitization
+        sample_idx = np.arange(nsamples)
+
+        w,sc = unit
+        # mask the unit to the period of the video
+        u_m = rec.unitdf.loc[(w,sc)].TDTts.between(MST_FA,MET_FA)
+        u_times = rec.unitdf.loc[(w,sc),'TDTts'][u_m].values
+        # have to offset the u_times to begin at video start
+        u_times-=MST_FA
+        u_waves = rec.waveforms[(w,sc)][u_m]
+
+        # find the corresponding index into the wavedata 
+        SU_audio_wv_idxs = (u_times*SU_fs).astype(int)
+
+        # now do the fancy indexing, with numpy broadcasting
+        idx = SU_audio_wv_idxs[:,None] + sample_idx[None,:]
+        SU_audio_wv[idx] = u_waves.reshape(idx.shape)
+
+        # interpolate the waves, based on the output_frame_rate
+        xp = np.linspace(0,Adur,len(SU_audio_wv))
+        x = np.linspace(0,Adur,int(len(SU_audio_wv)*2*(frame_rate/out_frame_rate)))
+        SU_audio_wv_intrp = np.interp(x,xp,SU_audio_wv)
+
+        # now I just have to write the wave and join it to the video.
+        from scipy.io.wavfile import write as writewav
+        SU_data_wave_name = output_path.split(os.extsep)[0]+"audio_w%02d_sc%d.wav" % (w,sc)
+
+        # instead of using rubber band, try just adjust the integer sample frequency in the wav file to m
+        # to mach the length of the video, considering the length of the wav data.
+        # have to amplify the audio, and clip, and cast to float32 for the wave format
+        scld_SU_audio = np.clip((SU_audio_wv*10**4),-1,1).astype(np.float32)
+        writewav(SU_data_wave_name, int(len(scld_SU_audio)/float(vid_dur)), scld_SU_audio)
+
+        merge_run = ['ffmpeg','-i', output_path,'-i', SU_data_wave_name, 
+                     '-c:v', 'copy', '-c:a', 'aac', 
+                     output_path.split(os.extsep)[0]+"sound_w%02d_sc%d.mp4" % (w,sc)]
+        subprocess.run(merge_run)
