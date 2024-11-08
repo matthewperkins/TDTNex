@@ -53,6 +53,7 @@ def trig_signal_avgsem(Signal,fs,peak_indexs,lpad,rpad):
     sig_avg = sig_avg/len(start_indexs)
 
     # loop through again to compute the sem
+    print('here now')
     sig_sem = np.zeros(sig_avg.shape)
     for i, start_index in enumerate(start_indexs[_m]):
         sig_sem+=(Signal[start_index:start_index+nsamples]-sig_avg)**2
@@ -1435,9 +1436,9 @@ def get_lsr_stim_blocks(header,laser_name = 'LsrP',maxISI=2,minNPulse=5):
         return None
     # have to contstruct the stimulus epocs
     lsr_burst_start_idxs = np.where((np.diff(\
-            np.r_[-maxISI*1.1,header.stores.LsrP.onset][::-1])[::-1])<-maxISI)[0]
+            np.r_[-maxISI*1.1,header.stores[laser_name].onset][::-1])[::-1])<-maxISI)[0]
     lsr_burst_end_idxs = np.where(np.diff(\
-        np.r_[header.stores.LsrP.onset,dur+maxISI*1.1])>maxISI)[0]
+        np.r_[header.stores[laser_name].onset,dur+maxISI*1.1])>maxISI)[0]
     # I have some singletons in here, and some general garbage
     LsrStimIdxs = np.c_[lsr_burst_start_idxs,lsr_burst_end_idxs]
     # drop all the stimulus burst with fewer than 5 stimulus
@@ -1445,7 +1446,7 @@ def get_lsr_stim_blocks(header,laser_name = 'LsrP',maxISI=2,minNPulse=5):
     mask = np.ones(len(LsrStimIdxs), np.bool_)
     mask[drop_idxs] = 0
     LsrStimIdxs = LsrStimIdxs[mask]
-    LsrStimuli = header.stores.LsrP.onset[LsrStimIdxs]
+    LsrStimuli = header.stores[laser_name].onset[LsrStimIdxs]
     LsrStimFreqs = np.diff(LsrStimIdxs).flatten()/np.diff(LsrStimuli).flatten()
     stim_durs = np.diff(LsrStimuli)
     # now make a data frame
