@@ -53,7 +53,6 @@ def trig_signal_avgsem(Signal,fs,peak_indexs,lpad,rpad):
     sig_avg = sig_avg/len(start_indexs)
 
     # loop through again to compute the sem
-    print('here now')
     sig_sem = np.zeros(sig_avg.shape)
     for i, start_index in enumerate(start_indexs[_m]):
         sig_sem+=(Signal[start_index:start_index+nsamples]-sig_avg)**2
