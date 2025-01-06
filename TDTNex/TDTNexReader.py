@@ -1486,7 +1486,7 @@ def make_bursts(sig,xs,prom=8.5,startISI=0.8,endISI=1,minN=3):
     bursts = all_peaks[np.c_[fix_starts,fix_ends]]
     burst_lens = np.diff(np.c_[fix_starts,fix_ends])
     # drop burst with fewer than 3 events
-    bursts = bursts[(burst_lens>3).flatten()]
+    bursts = bursts[(burst_lens>minN).flatten()]
     return bursts
     
 def tdt_ts_to_mov_ts(tdt_header,movie,sec):
