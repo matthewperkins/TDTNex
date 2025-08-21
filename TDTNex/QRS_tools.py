@@ -1,6 +1,6 @@
 import numba as nb
-from numba import njit
-@njit
+import numpy as np
+@nb.njit
 def rolling_RR_guess(QRS_times,RRnominal,wlen=4):
     win_center = (wlen//2)-1
     indexs = np.arange(win_center,len(QRS_times)-(wlen-win_center-1))
@@ -17,7 +17,7 @@ def rolling_RR_guess(QRS_times,RRnominal,wlen=4):
 
 # lets set this up with njit?
 @nb.njit
-def fill_missing_QRS(QRS_idxs,skip_idxs,prov_QRS_idxs,
+def fill_missing_QRS(QRSsig,QRS_idxs,skip_idxs,prov_QRS_idxs,
                      xs,up_proms,envelope,no_choke=1000):
     add_idxs = np.zeros(len(skip_idxs),dtype=np.int64)
     add_order = np.zeros(len(skip_idxs),dtype=np.int64)
@@ -38,8 +38,8 @@ def fill_missing_QRS(QRS_idxs,skip_idxs,prov_QRS_idxs,
         estRR = (preRR+postRR)/2
         ratio = skipRR/estRR
         _t = xs[QRS_idxs[skip_idx]]
-        _l = _t+estRR*0.8
-        _r = _t+estRR*1.2
+        _l = _t+estRR*0.7
+        _r = _t+estRR*1.3
         # reintroduce, conditional to the amplitude?
         slice_bounds = np.searchsorted(xs[prov_QRS_idxs],np.array([_l,_r]))
         cand_peaks = np.arange(slice_bounds[0],slice_bounds[1])

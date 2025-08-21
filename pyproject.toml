@@ -1,6 +1,6 @@
 [project]
 name = "TDTNex"
-version = "0.4.6"
+version = "0.4.8"
 authors = [
   { name="Matthew Perkins", email="matthew.perkins@mssm.edu" },
   ]
@@ -13,6 +13,8 @@ authors = [
 dependencies = [
 	     'pandas',
 	     'numpy',
+	     'opencv-python',
+	     'numba',
 	     'matplotlib',
 	     'tdt',
 	     ]	      

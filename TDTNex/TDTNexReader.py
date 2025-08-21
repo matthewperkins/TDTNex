@@ -1,3 +1,4 @@
+
 from neo import NeuroExplorerIO
 #%matplotlib inline
 import matplotlib.pyplot as plt
@@ -528,8 +529,20 @@ class TDTNex(object):
                        bin_width=0.1,hist_yscale=None, 
                        lwds=1,lineoff=1,linelen=1,
                        inset_yscale=None,raster_color='black',
-                       plt_rand=False,addLabel = True,wv_lw = 0.25):
+                       plt_rand=False,addLabel = True,
+                       rand_N = 50,fill_alpha=0.3,
+                       maxN_wv_plot = 300,
+                       wv_alpha=0.4,wv_lw = 0.25,
+                       wv_rasterized=True,
+                       raster_rasterized=True):
         evnts, evntsArray,raster_segs,(rates,bx) = self.UnitRaster(wire,sc,times,lpad,rpad)
+        if maxN_wv_plot is not None:
+            assert(type(maxN_wv_plot)==type(int(0))),'must be integer'
+            assert(maxN_wv_plot>0),'must be positive'
+            if raster_segs.shape[0]>maxN_wv_plot:
+                from numpy.random import default_rng 
+                rng = default_rng()
+                raster_segs=rng.choice(raster_segs,size=maxN_wv_plot,axis=0)
         if evnts is None:
             print("no snips")
             return None, (None, None, None), (None, None)
@@ -543,15 +556,17 @@ class TDTNex(object):
         wf_ax = plt.axes([0.75,0.75,0.25,0.25])
         # preindex a segs array for the random line collection
         totsnips = len(self.unitdf.loc[(wire,sc),'TDTts'])
-        if totsnips>50:
-            random_segs = np.zeros((50,30,2))
-            random_segs[:,:,1] = self.waveforms[(wire,sc)][np.random.randint(0,totsnips-1,50)]
+        if totsnips>rand_N:
+            random_segs = np.zeros((rand_N,30,2))
+            random_segs[:,:,1] = self.waveforms[(wire,sc)][np.random.randint(0,totsnips-1,rand_N)]
         else:
             random_segs = np.zeros((totsnips,30,2))
             random_segs[:,:,1] = self.waveforms[(wire,sc)][:]
         random_segs[:,:,0]=np.r_[0:30]
-        raster_ax.eventplot(evnts,linewidths = lwds, linelengths = linelen, 
+        event_collections = raster_ax.eventplot(evnts,linewidths = lwds, linelengths = linelen, 
                             lineoffsets = lineoff, color = 'black')
+        if raster_rasterized:
+            _=[ec.set_rasterized(True) for ec in event_collections]
         # now would like to add a patch if there are event offsets
         if time_offsets is not None and time_preceeds is not None:
             assert(len(times)==len(time_offsets)),"Length of Time Offsets %d, is different than that of Times %d" % (len(times),len(time_offsets))
@@ -560,7 +575,7 @@ class TDTNex(object):
             # this maybe slow for > 200 events
             for _i, (pre,_t,off) in enumerate(zip(time_preceeds,times,time_offsets)):
                 _r= Rectangle((pre-_t,(lineoff*_i)-linelen/2),off-pre,lineoff,
-                              color = 'blue',alpha = 0.6, ec = 'None')
+                              color = 'blue',alpha = fill_alpha, ec = 'None')
                 raster_ax.add_patch(_r)
         elif time_offsets is not None:
             assert(len(times)==len(time_offsets)),"Length of Time Offsets %d, is different than that of Times %d" % (len(times),len(time_offsets))
@@ -568,17 +583,19 @@ class TDTNex(object):
             # this maybe slow for > 200 events
             for _i, (_t,off) in enumerate(zip(times,time_offsets)):
                 _r= Rectangle((0,(lineoff*_i)-linelen/2),off-_t,lineoff,
-                              color = 'blue',alpha = 0.6, ec = 'None')
+                              color = 'blue',alpha = fill_alpha, ec = 'None')
                 raster_ax.add_patch(_r)
                                                                                                                      
         # have to do the inset axes, histogram
         wf_ax.patch.set_alpha(0.02)
         raster_snips = LineCollection(raster_segs, linewidths=wv_lw,
                                 colors=raster_color, 
-                                linestyle='solid')
+                                linestyle='solid',alpha=wv_alpha)
         rand_snips = LineCollection(random_segs, linewidths=wv_lw,
                                 colors='blue', 
-                                linestyle='solid')
+                                linestyle='solid',alpha=wv_alpha)
+        if wv_rasterized:
+            _=[snips.set_rasterized(True) for snips in [raster_snips,rand_snips]]
         if plt_rand:
             wf_ax.add_collection(rand_snips)
         wf_ax.add_collection(raster_snips)
@@ -1292,7 +1309,7 @@ def trig_vec(ev_times, spike_times,lshift,rshift,bin_width):
 @njit
 def descritized_spike_train(spike_times, bins):
     has_spk = np.digitize(spike_times,bins)
-    dst = np.zeros(bins.shape,dtype=np.bool8)
+    dst = np.zeros(bins.shape,dtype=np.bool)
     dst[has_spk] = True
     return dst
     
@@ -1303,7 +1320,7 @@ def descritized_spike_raster(event_times,dst,dt,Wn):
     dt, time step in seconds
     Wn, window width, number of time steps'''
     event_didxs = (event_times/dt).astype(np.int64)
-    dsr = np.zeros((len(event_times),Wn),dtype=np.bool_)
+    dsr = np.zeros((len(event_times),Wn),dtype=np.bool)
     ii=0
     for didx in event_didxs:
         dsr[ii,:] = dst[didx:didx+Wn]
@@ -1432,6 +1449,10 @@ def BalloonProgram(tdt_d,start_idx,rate,fs,Op='PAOp',Dr='PADr', measures = False
     else:    
         return (xs,vol)
 
+def get_dur_from_header(header):
+    return (datetime.fromtimestamp(header.stop_time[0])-\
+           datetime.fromtimestamp(header.start_time[0])).total_seconds()
+
 # pull laser stimulation blocks out from the headers
 # without having to read the whole block
 def get_lsr_stim_blocks(header,laser_name = 'LsrP',maxISI=2,minNPulse=5):
@@ -1451,7 +1472,7 @@ def get_lsr_stim_blocks(header,laser_name = 'LsrP',maxISI=2,minNPulse=5):
     LsrStimIdxs = np.c_[lsr_burst_start_idxs,lsr_burst_end_idxs]
     # drop all the stimulus burst with fewer than 5 stimulus
     drop_idxs = np.where(np.diff(LsrStimIdxs).flatten()<minNPulse)[0]
-    mask = np.ones(len(LsrStimIdxs), np.bool_)
+    mask = np.ones(len(LsrStimIdxs), np.bool)
     mask[drop_idxs] = 0
     LsrStimIdxs = LsrStimIdxs[mask]
     LsrStimuli = header.stores[laser_name].onset[LsrStimIdxs]
@@ -1482,13 +1503,13 @@ def make_bursts(sig,xs,prom=8.5,startISI=0.8,endISI=1,minN=3):
     insert_starts = np.searchsorted(burst_end_idxs_u,burst_start_idxs_u)
     if np.any(np.diff(insert_starts)==0):
         # if there are ambiguous starts to the same end, use the earlier start
-        fix_starts = burst_start_idxs_u[np.r_[np.diff(insert_starts).astype(np.bool_),True]]
+        fix_starts = burst_start_idxs_u[np.r_[np.diff(insert_starts).astype(np.bool),True]]
     else:
         fix_starts = burst_start_idxs_u
     # now check the burst ends
     insert_ends = np.searchsorted(fix_starts,burst_end_idxs_u)
     if np.any(np.diff(insert_ends)==0):
-        fix_ends = burst_end_idxs_u[np.r_[np.diff(insert_ends).astype(np.bool_),True]]
+        fix_ends = burst_end_idxs_u[np.r_[np.diff(insert_ends).astype(np.bool),True]]
     else:
         fix_ends = burst_end_idxs_u
     bursts = all_peaks[np.c_[fix_starts,fix_ends]]
@@ -1507,7 +1528,7 @@ def events_to_bursts(onset, rec_t_start, rec_t_end, maxISI, minNPulse):
     LsrStimIdxs = np.c_[lsr_burst_start_idxs,lsr_burst_end_idxs]
     # drop all the stimulus burst with fewer than 5 stimulus
     drop_idxs = np.where(np.diff(LsrStimIdxs).flatten()<minNPulse)[0]
-    mask = np.ones(len(LsrStimIdxs), np.bool_)
+    mask = np.ones(len(LsrStimIdxs), np.bool)
     mask[drop_idxs] = 0
     LsrStimIdxs = LsrStimIdxs[mask]
     LsrStimuli = onset[LsrStimIdxs]
@@ -2047,7 +2068,8 @@ def addSB(ax, sb_anch, xw, yh,
         ax.text(x,y+yh/2, y_lab_fmt % yh,transform = ylab_pad_transform,va = 'center',
                 size = text_size, clip_on = False)
     ax.add_artist(xsb)
-    ax.add_artist(ysb)        
+    ax.add_artist(ysb)
+    return (xsb,ysb)
 
 def drop_bad_first_FrmN(tdt_d,epoc_name = 'FrmN'):
     assert(epoc_name in tdt_d.epocs.keys()),"Frame Name %s not in epocs names" % (epoc_name)
@@ -2066,6 +2088,7 @@ def MakeOEDataClip(OE_FrameOnsets,first_OE_timestamp,movie,movie_start_time,movi
                    LsrDf=None,
                    output_name = "ForceMovie",
                    unit=None,
+                   frame_shim=0,
                    video_range = 0.3, out_frame_rate=None, bitrate=1000):
     '''
     Make a movie from a synchronously recorded stream for OE, and manta? camera
@@ -2082,7 +2105,9 @@ def MakeOEDataClip(OE_FrameOnsets,first_OE_timestamp,movie,movie_start_time,movi
     # now, add below the frame, by the 'video_range'
     data_height = int(((frame_height*video_range)//2)*2)
     out_frame_height = frame_height+data_height
-    
+    # I noticed in some videos that the video stream is perdicatable about 36 frames behind the data.
+    # I have no idea why this is, maybe is h265 sucking up frames?
+    # add a frame shim param to deal with this.
     # get the frame rate
     frame_rate = 1/mode(np.diff(OE_FrameOnsets)).mode
     # find the frame indexes corresponding to the movie start and stop times
@@ -2178,7 +2203,7 @@ def MakeOEDataClip(OE_FrameOnsets,first_OE_timestamp,movie,movie_start_time,movi
             blank_out_frame[frame_height:,:,:]=0
             # index in to the decimated data
             # this is insane
-            VidDataidx = int((OE_FrameOnsets[framen]-first_OE_timestamp-StreamReadRelSecOffset-time_span/4)*adj_fs)
+            VidDataidx = int((OE_FrameOnsets[framen-frame_shim]-first_OE_timestamp-StreamReadRelSecOffset-time_span/4)*adj_fs)
             for i in range(len(VidDataStreams)):
                 points = np.column_stack((Cols,VidData_a[i,VidDataidx:VidDataidx+stream_dp])).astype(np.int32)
                 points = points.reshape((-1,1,2))
@@ -2203,15 +2228,26 @@ def MakeOEDataClip(OE_FrameOnsets,first_OE_timestamp,movie,movie_start_time,movi
 
 
 def sc_rate_intrp(time_series,xp):
+    # if there are no spikes until the end of the file, what to do?
     inst_rates = 1/np.diff(time_series)
     __xs = np.c_[time_series[0:-1],
                  time_series[1:]].flatten()
     __ys = np.repeat(inst_rates,2)
-    return np.interp(xp,__xs,__ys)
+    return np.interp(xp,__xs,__ys,left=0,right=0)
 
-@nb.njit
+@njit
 def mean_bucket(SS_idx_a,trace):
     bucket_mean = np.zeros(SS_idx_a.shape[0],dtype=np.float64)
     for i,(S,E) in enumerate(SS_idx_a):
         bucket_mean[i] = np.mean(trace[S:E])
     return bucket_mean
+
+@njit
+def sel_bucket(SS_idx_a,events):
+    len_flat = int(np.sum(np.diff(SS_idx_a).flatten()))
+    flat_a = np.zeros(len_flat,dtype=np.float64)
+    _count = 0
+    for i,(S,E) in enumerate(SS_idx_a):
+        flat_a[_count:_count+(E-S)] = events[S:E]
+        _count+=E-S
+    return flat_a
