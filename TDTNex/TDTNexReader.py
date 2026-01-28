@@ -529,7 +529,9 @@ class TDTNex(object):
                        bin_width=0.1,hist_yscale=None, 
                        lwds=1,lineoff=1,linelen=1,
                        inset_yscale=None,raster_color='black',
+                       OffsetFillColor = 'blue',
                        plt_rand=False,addLabel = True,
+                       event_alpha=0.75,
                        rand_N = 50,fill_alpha=0.3,
                        maxN_wv_plot = 300,
                        wv_alpha=0.4,wv_lw = 0.25,
@@ -564,7 +566,7 @@ class TDTNex(object):
             random_segs[:,:,1] = self.waveforms[(wire,sc)][:]
         random_segs[:,:,0]=np.r_[0:30]
         event_collections = raster_ax.eventplot(evnts,linewidths = lwds, linelengths = linelen, 
-                            lineoffsets = lineoff, color = 'black')
+                                                lineoffsets = lineoff, color = 'black',alpha=event_alpha)
         if raster_rasterized:
             _=[ec.set_rasterized(True) for ec in event_collections]
         # now would like to add a patch if there are event offsets
@@ -575,7 +577,7 @@ class TDTNex(object):
             # this maybe slow for > 200 events
             for _i, (pre,_t,off) in enumerate(zip(time_preceeds,times,time_offsets)):
                 _r= Rectangle((pre-_t,(lineoff*_i)-linelen/2),off-pre,lineoff,
-                              color = 'blue',alpha = fill_alpha, ec = 'None')
+                              color = OffsetFillColor, alpha = fill_alpha, ec = 'None')
                 raster_ax.add_patch(_r)
         elif time_offsets is not None:
             assert(len(times)==len(time_offsets)),"Length of Time Offsets %d, is different than that of Times %d" % (len(times),len(time_offsets))
@@ -583,7 +585,7 @@ class TDTNex(object):
             # this maybe slow for > 200 events
             for _i, (_t,off) in enumerate(zip(times,time_offsets)):
                 _r= Rectangle((0,(lineoff*_i)-linelen/2),off-_t,lineoff,
-                              color = 'blue',alpha = fill_alpha, ec = 'None')
+                              color = OffsetFillColor, alpha = fill_alpha, ec = 'None')
                 raster_ax.add_patch(_r)
                                                                                                                      
         # have to do the inset axes, histogram
