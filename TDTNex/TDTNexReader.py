@@ -1901,10 +1901,10 @@ def LaserDataClip(tdt_d,movie,movie_start_time,movie_end_time, time_span = 7.5,
     # h265parse ! mp4mux ! \
     # filesink location=%s" % (bitrate, output_path)
     # new pipeline, specify pixel format to be powerpoint compatible.
-    appsink2mp4 = "appsrc ! \
-                   videoconvert ! video/x-raw, format=NV12 ! nvh264enc bitrate=%d ! \
+    appsink2mp4 = f'appsrc ! \
+                   videoconvert ! video/x-raw, format=NV12 ! nvh264enc bitrate={bitrate} ! \
                    h264parse ! mp4mux ! \
-                   filesink location=%s" % (bitrate, output_path)
+                   filesink location="{output_path}"'# % (bitrate, output_path)
     if out_frame_rate is None:
         out_frame_rate = frame_rate
         vid_dur = (MET_FA - MST_FA)
@@ -2139,10 +2139,10 @@ def MakeOEDataClip(OE_FrameOnsets,first_OE_timestamp,movie,movie_start_time,movi
     # h265parse ! mp4mux ! \
     # filesink location=%s" % (bitrate, output_path)
     # new pipeline, specify pixel format to be powerpoint compatible.
-    appsink2mp4 = "appsrc ! \
-                   videoconvert ! video/x-raw, format=NV12 ! nvh264enc bitrate=%d ! \
+    appsink2mp4 = f'appsrc ! \
+                   videoconvert ! video/x-raw, format=NV12 ! nvh264enc bitrate={bitrate} ! \
                    h264parse ! mp4mux ! \
-                   filesink location=%s" % (bitrate, output_path)
+                   filesink location="{output_path}"'# % (bitrate, output_path)
     if out_frame_rate is None:
         out_frame_rate = frame_rate
         vid_dur = (MET_FA - MST_FA)
