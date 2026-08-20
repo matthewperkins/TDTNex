@@ -156,7 +156,7 @@ def get_movie_dur(movie):
 # lets dig out the seconds from the time stamps
 def time_stamp_to_sec(ts):
     import re
-    retimestamp = re.compile(r'.*(?P<ts_hour>[0-9]{2})[-_:](?P<ts_minute>[0-9]{2})[-_:](?P<ts_second>[0-9]{2})\.(?P<ts_millisec>[0-9]{3})')
+    retimestamp = re.compile(r'.*(?P<ts_hour>[0-9]{2})[-_:](?P<ts_minute>[0-9]{2})[-_:](?P<ts_second>[0-9]{2})[:.](?P<ts_millisec>[0-9]{3})')
     groupdict = retimestamp.search(ts)
     ts_h = float(groupdict['ts_hour'])
     ts_m = float(groupdict['ts_minute'])
@@ -1702,6 +1702,10 @@ def MakeHLDataClip(tdt_d,movie,movie_start_time,movie_end_time,
                    videoconvert ! video/x-raw, format=NV12 ! nvh264enc bitrate=%d ! \
                    h264parse ! mp4mux ! \
                    filesink location=%s" % (bitrate, output_path)
+    appsink265mp4 = "appsrc ! \
+                   videoconvert ! video/x-raw, format=NV12 ! nvh265enc rate-control=vbr bitrate=%d ! \
+                   h265parse ! mp4mux ! \
+                   filesink location=%s" % (bitrate, output_path)
     if out_frame_rate is None:
         out_frame_rate = frame_rate
         vid_dur = (MET_FA - MST_FA)
@@ -2031,7 +2035,8 @@ def addSB(ax, sb_anch, xw, yh,
           bar_yoff=2,
           ylab_yoff=1,ylab_xoff=1,
           xlab_yoff=1,xlab_xoff=1,
-          bar_color = 'black'): 
+          bar_color = 'black',
+          text_color = 'black'): 
     from matplotlib.lines import Line2D
     from matplotlib import transforms
     ax.get_xlim()
@@ -2063,12 +2068,12 @@ def addSB(ax, sb_anch, xw, yh,
     if x_lab_fmt is not None:
         ax.text(x+xw/2,y, x_lab_fmt % xw,
                 transform = xlab_pad_transform, va = 'top', ha = 'center', 
-                size = text_size, clip_on = False)
+                size = text_size, clip_on = False, color = text_color)
     ysb = Line2D(np.r_[x,x],np.r_[y,y+yh],lw = sblw, color = bar_color, 
                  transform = bar_pad_transform,zorder = 12, clip_on = False)
     if y_lab_fmt is not None:
         ax.text(x,y+yh/2, y_lab_fmt % yh,transform = ylab_pad_transform,va = 'center',
-                size = text_size, clip_on = False)
+                size = text_size, clip_on = False, color = text_color)
     ax.add_artist(xsb)
     ax.add_artist(ysb)
     return (xsb,ysb)
@@ -2091,7 +2096,7 @@ def MakeOEDataClip(OE_FrameOnsets,first_OE_timestamp,movie,movie_start_time,movi
                    output_name = "ForceMovie",
                    unit=None,
                    frame_shim=0,
-                   video_range = 0.3, out_frame_rate=None, bitrate=1000):
+                   video_range = 0.3, out_frame_rate=None, bitrate=1000, h265=False, vds_colors = None):
     '''
     Make a movie from a synchronously recorded stream for OE, and manta? camera
     time_span is in seconds and sets the data presentation by downsampling, 
@@ -2123,6 +2128,10 @@ def MakeOEDataClip(OE_FrameOnsets,first_OE_timestamp,movie,movie_start_time,movi
     assert(np.abs(movie_end_time-MET_FA)<0.05),"movie end time %g is too far away from closest frame %g" % (movie_end_time,OE_FrameOnsets[frame_idx_end])
     # seek to the starting frame:
     print("FPS:",cap.get(cv2.CAP_PROP_FPS))
+    print(f"movie start frame{frame_idx_start}\n\
+file time movie start {MST_FA}\n\
+movie end frame {frame_idx_end}\n\
+file time movie end {MET_FA}")
     assert cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx_start)
     # file name stuff
     import os
@@ -2143,21 +2152,30 @@ def MakeOEDataClip(OE_FrameOnsets,first_OE_timestamp,movie,movie_start_time,movi
                    videoconvert ! video/x-raw, format=NV12 ! nvh264enc bitrate={bitrate} ! \
                    h264parse ! mp4mux ! \
                    filesink location="{output_path}"'# % (bitrate, output_path)
+    appsink265mp4 = f"appsrc ! \
+                   videoconvert ! video/x-raw, format=NV12 ! nvh265enc rc-mode=3 bitrate={bitrate} ! \
+                   h265parse ! mp4mux ! \
+                   filesink location={output_path}"
     if out_frame_rate is None:
         out_frame_rate = frame_rate
         vid_dur = (MET_FA - MST_FA)
     else:
         vid_dur = (MET_FA - MST_FA)*(frame_rate/out_frame_rate)
-    print(appsink2mp4)
-    out = cv2.VideoWriter(appsink2mp4, cv2.CAP_GSTREAMER, 0, out_frame_rate, 
+    if h265:
+        out = cv2.VideoWriter(appsink265mp4, cv2.CAP_GSTREAMER, 0, out_frame_rate, 
+                          (frame_width,out_frame_height),True)
+    else:
+        out = cv2.VideoWriter(appsink2mp4, cv2.CAP_GSTREAMER, 0, out_frame_rate, 
                           (frame_width,out_frame_height),True)
     stream_dp = frame_width
     stream_offset = stream_dp//2
     VidDatas = []
+    if vds_colors is None:
+        vds_colors = [(0,255,255)]*len(VidDataStreams)
     # have to work out the scaling and offsets for the two streams
+    # just enforce the same sampling rate for all the data streams.
     for ii,VDS in enumerate(VidDataStreams):
-        x,y,adj_fs = VDS.ds_for_vid(frame_width,time_span)
-        print(adj_fs,ii)
+        vid_data_x,y,adj_fs = VDS.ds_for_vid(frame_width,time_span)
         # device scale
         y*=(data_height/len(VidDataStreams))
         # device offset
@@ -2165,7 +2183,6 @@ def MakeOEDataClip(OE_FrameOnsets,first_OE_timestamp,movie,movie_start_time,movi
         VidDatas.append(y.astype(np.int32))
     Cols = np.arange(frame_width)
     VidData_a = np.array(VidDatas)
-    print(VidData_a.shape,VidData_a.shape[1]/adj_fs)
     lx1,ly1 = frame_width//2, 0
     lx2,ly2 = frame_width//2, data_height
     text_org = frame_width-100,100
@@ -2190,7 +2207,10 @@ def MakeOEDataClip(OE_FrameOnsets,first_OE_timestamp,movie,movie_start_time,movi
                 .flatten()>1)).flatten()
     else:
         match_row = lambda FN: np.array([])
-    
+
+    VidDataIdxs = np.searchsorted(vid_data_x, OE_FrameOnsets[np.r_[frame_idx_start:frame_idx_end+1]])-stream_offset
+    print(f"stream offset {stream_offset}, Vid Data Array Shape:{VidData_a.shape} Vid Xs Shape {vid_data_x.shape}")
+    print(f"first VidData_Index: {VidDataIdxs[0]}, last Index: {VidDataIdxs[-1]}")
     while cap.isOpened():
         grabbed, frame = cap.read()
         if grabbed:
@@ -2205,11 +2225,10 @@ def MakeOEDataClip(OE_FrameOnsets,first_OE_timestamp,movie,movie_start_time,movi
             blank_out_frame[frame_height:,:,:]=0
             # index in to the decimated data
             # this is insane
-            VidDataidx = int((OE_FrameOnsets[framen-frame_shim]-first_OE_timestamp-StreamReadRelSecOffset-time_span/4)*adj_fs)
             for i in range(len(VidDataStreams)):
-                points = np.column_stack((Cols,VidData_a[i,VidDataidx:VidDataidx+stream_dp])).astype(np.int32)
+                points = np.column_stack((Cols,VidData_a[i,VidDataIdxs[framen-frame_idx_start]:VidDataIdxs[framen-frame_idx_start]+stream_dp])).astype(np.int32)
                 points = points.reshape((-1,1,2))
-                cv2.polylines(blank_out_frame,[points],False,(0,255,255),pl_thickness,
+                cv2.polylines(blank_out_frame,[points],False,vds_colors[i],pl_thickness,
                               cv2.LINE_AA)
             # draw a verticle line:
             cv2.line(blank_out_frame[frame_height:,:,:], (lx1, ly1), (lx2, ly2), (150, 150, 0), thickness=line_thickness)
@@ -2227,7 +2246,6 @@ def MakeOEDataClip(OE_FrameOnsets,first_OE_timestamp,movie,movie_start_time,movi
     if unit is not None:
         pass
         # no finished with this yet, have to get snips for the phy2 kilosort output.
-
 
 def sc_rate_intrp(time_series,xp):
     # if there are no spikes until the end of the file, what to do?
